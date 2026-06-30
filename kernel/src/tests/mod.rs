@@ -5,7 +5,7 @@ pub mod memory_tests;
 pub mod object_tests;
 pub mod smp_tests;
 
-pub const RUN_TESTS: bool = false;
+pub const RUN_TESTS: bool = true;
 
 pub fn run_pre_vfs_tests() {
     if !RUN_TESTS {
@@ -14,6 +14,7 @@ pub fn run_pre_vfs_tests() {
     klogln!("========== RUNNING SYSTEM DIAGNOSITC UNIT TESTS (PHASE 1) ==========");
     concurrency_tests::run_concurrency_tests();
     memory_tests::run_pmm_tests();
+    memory_tests::run_range_tree_tests();
     klogln!("================= ALL DIAGNOSTIC UNIT TESTS PASSED =================");
 }
 

@@ -15,7 +15,12 @@ use crate::memory::{
     BlockSize,
     GLOBAL_PMM,
     HUGE_PAGE_SIZE,
+    range_tree::{
+        RangeMap,
+        RangeInsertError,
+    }
 };
+
 use crate::{
     klog,
     klogln,
@@ -175,5 +180,129 @@ fn test_freelist_isolation() {
 
     pmm.free(block1, BlockSize::Normal);
     pmm.free(block2, BlockSize::Normal);
+    klogln!("OK");
+}
+
+pub fn run_range_tree_tests() {
+    klogln!("RUNNING RANGE TREE TESTS...");
+    test_range_tree_insert_lookup();
+    test_range_tree_overlap_rejection();
+    test_range_tree_gap_search();
+    test_range_tree_remove();
+    test_range_tree_remove_stress();
+    klogln!("ALL RANGE TREE TESTS PASSED!");
+}
+
+fn test_range_tree_insert_lookup() {
+    klog!("  Testing range tree insert/lookup... ");
+    let mut tree = RangeMap::new();
+
+    assert_eq!(tree.insert(0x3000, 0x4000, 3), Ok(()));
+    assert_eq!(tree.insert(0x1000, 0x2000, 1), Ok(()));
+    assert_eq!(tree.insert(0x5000, 0x6000, 5), Ok(()));
+
+    assert_eq!(*tree.get(0x1000).expect("missing first range").value, 1);
+    assert_eq!(*tree.get(0x3FFF).expect("missing middle range").value, 3);
+    assert_eq!(*tree.get(0x5001).expect("missing last range").value, 5);
+
+    assert!(tree.get(0x2000).is_none());
+    assert!(tree.get(0x4000).is_none());
+    assert!(tree.validate());
+
+    klogln!("OK");
+}
+
+fn test_range_tree_overlap_rejection() {
+    klog!("  Testing range tree overlap rejection... ");
+    let mut tree = RangeMap::new();
+
+    assert_eq!(tree.insert(0x1000, 0x2000, 1), Ok(()));
+    assert_eq!(tree.insert(0x2000, 0x3000, 2), Ok(()));
+
+    assert_eq!(tree.insert(0x0800, 0x1001, 3), Err(RangeInsertError::Overlap));
+    assert_eq!(tree.insert(0x1800, 0x2800, 4), Err(RangeInsertError::Overlap));
+    assert_eq!(tree.insert(0x2FFF, 0x4000, 5), Err(RangeInsertError::Overlap));
+    assert_eq!(tree.insert(0x4000, 0x4000, 6), Err(RangeInsertError::Empty));
+
+    assert!(tree.validate());
+
+    klogln!("OK");
+}
+
+fn test_range_tree_gap_search() {
+    klog!("  Testing range tree gap search... ");
+    let mut tree = RangeMap::new();
+
+    assert_eq!(tree.insert(0x1000, 0x2000, 1), Ok(()));
+    assert_eq!(tree.insert(0x4000, 0x5000, 2), Ok(()));
+    assert_eq!(tree.insert(0x8000, 0x9000, 3), Ok(()));
+
+    assert_eq!(tree.first_gap(0x1000, 0x1000, 0x1000, 0xA000), Some(0x2000));
+    assert_eq!(tree.first_gap(0x2000, 0x1000, 0x1000, 0xA000), Some(0x2000));
+    assert_eq!(tree.first_gap(0x3000, 0x1000, 0x1000, 0xA000), Some(0x5000));
+    assert_eq!(tree.first_gap(0x2000, 0x2000, 0x1000, 0xA000), Some(0x2000));
+    assert_eq!(tree.first_gap(0x2000, 0x2000, 0x5000, 0x8000), Some(0x6000));
+    assert_eq!(tree.first_gap(0x3000, 0x2000, 0x1000, 0xA000), None);
+    assert_eq!(tree.first_gap(0x2000, 0x1000, 0x9000, 0xA000), None);
+
+    assert!(tree.validate());
+
+    klogln!("OK");
+}
+
+fn test_range_tree_remove() {
+    klog!("  Testing range tree remove... ");
+    let mut tree = RangeMap::new();
+
+    for i in 0..32 {
+        let start = 0x1000 + i * 0x2000;
+        let end = start + 0x1000;
+        assert_eq!(tree.insert(start, end, i), Ok(()));
+    }
+
+    assert_eq!(tree.remove(0x1000), Some(0));
+    assert_eq!(tree.remove(0x1000 + 15 * 0x2000), Some(15));
+    assert_eq!(tree.remove(0x1000 + 31 * 0x2000), Some(31));
+    assert_eq!(tree.remove(0xDEAD), None);
+
+    assert!(tree.get(0x1000).is_none());
+    assert!(tree.get(0x1000 + 15 * 0x2000).is_none());
+    assert!(tree.get(0x1000 + 31 * 0x2000).is_none());
+
+    assert!(tree.validate());
+
+    klogln!("OK");
+}
+
+fn test_range_tree_remove_stress() {
+    klog!("  Testing range tree repeated remove/rebalance... ");
+    let mut tree = RangeMap::new();
+
+    for i in 0..128 {
+        let start = 0x1000 + i * 0x3000;
+        assert_eq!(tree.insert(start, start + 0x1000, i), Ok(()));
+        assert!(tree.validate());
+    }
+
+    for i in (0..128).step_by(2) {
+        let start = 0x1000 + i * 0x3000;
+        assert_eq!(tree.remove(start), Some(i));
+        assert!(tree.validate());
+    }
+
+    for i in (1..128).step_by(2) {
+        let start = 0x1000 + i * 0x3000;
+        assert_eq!(*tree.get(start).expect("odd range disappeared").value, i);
+    }
+
+    for i in (1..128).rev().step_by(2) {
+        let start = 0x1000 + i * 0x3000;
+        assert_eq!(tree.remove(start), Some(i));
+        assert!(tree.validate());
+    }
+
+    assert!(tree.is_empty());
+    assert!(tree.validate());
+
     klogln!("OK");
 }

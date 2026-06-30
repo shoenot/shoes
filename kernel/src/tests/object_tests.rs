@@ -1,15 +1,13 @@
 use vespertine_abi::op::{
-    ChannelOp,
     MemManOp,
     MemPoolOp,
 };
 use vespertine_abi::{
-    AccessRights,
-    HandleID,
-    Invocation,
+    AccessRights, FileOp, HandleID, Invocation
 };
 
-use crate::object::ipc::socket::init_ipc_pipeline;
+use crate::object::ipc::socket::SocketEndpoint;
+use crate::object::obj::KernelObject;
 use crate::object::vfs::{
     kernel_invoke,
     kernel_walk,
@@ -17,7 +15,7 @@ use crate::object::vfs::{
 use crate::klogln;
 
 pub async fn run_pool_tests() {
-    let mm_handle = kernel_walk("/Objects/MemoryManager", HandleID(0), AccessRights::all()).await.expect("No Memory Manager found");
+    let mm_handle = kernel_walk( "/System/Services/MemoryManager", HandleID(0), AccessRights::CREATE).await.expect("No Memory Manager found");
 
     let root_pool_handle = HandleID(
         kernel_invoke(mm_handle, Invocation::MemoryManager(MemManOp::CreatePool { limit: 0 })).await.expect("Failed to create root pool"),
@@ -40,26 +38,34 @@ pub async fn run_pool_tests() {
     klogln!("  - Attempted overflow allocation result: {:?}", break_attempt);
 }
 
-pub async fn run_channel_ipc_tests() {
-    klogln!("  - Initializing kernel IPC pipeline...");
-    let (tx, rx) = init_ipc_pipeline();
+pub async fn run_socket_ipc_tests() {
+    klogln!("  - Initializing kernel socket pair...");
+    let (left, right) = SocketEndpoint::new_pair();
 
-    // push a small message into the tx channel handle
-    let mut data = [0u8; 64];
-    data[..12].copy_from_slice(b"Hello Kernel");
-    let push_op = ChannelOp::PushSmall { data, len: 12 };
+    let input = b"Hello Kernel";
+    let write_op = FileOp::Write {
+        offset: 0,
+        buffer_ptr: input.as_ptr() as usize,
+        len: input.len(),
+    };
 
-    kernel_invoke(tx, Invocation::Channel(push_op)).await.expect("Failed to push to channel");
+    let bytes_written = left.invoke(Invocation::File(write_op), AccessRights::WRITE).await.expect("Failed to write to socket");
 
-    // pull the message from the rx channel handle
-    let mut rx_buf = [0u8; 64];
-    let pull_op = ChannelOp::Pull { buffer_ptr: rx_buf.as_mut_ptr() as usize };
+    assert_eq!(bytes_written, input.len());
 
-    let bytes_pulled = kernel_invoke(rx, Invocation::Channel(pull_op)).await.expect("Failed to pull from channel");
+    let mut output = [0u8; 64];
+    let read_op = FileOp::Read {
+        offset: 0,
+        buffer_ptr: output.as_mut_ptr() as usize,
+        len: output.len(),
+    };
 
-    assert_eq!(bytes_pulled, 12);
-    assert_eq!(&rx_buf[..12], b"Hello Kernel");
-    klogln!("  - Channel loopback push/pull verified successfully!");
+    let bytes_read = right.invoke(Invocation::File(read_op), AccessRights::READ).await.expect("Failed to read from socket");
+
+    assert_eq!(bytes_read, input.len());
+    assert_eq!(&output[..bytes_read], input);
+
+    klogln!("  - Socket loopback write/read verified successfully!");
 }
 
 pub async fn run_object_tests() {
@@ -67,7 +73,7 @@ pub async fn run_object_tests() {
     run_pool_tests().await;
 
     klogln!("Running Post-VFS Kernel IPC Tests...");
-    run_channel_ipc_tests().await;
+    run_socket_ipc_tests().await;
 
     klogln!("All Post-VFS tests passed!");
 }

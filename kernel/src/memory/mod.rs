@@ -4,6 +4,7 @@ mod init_pmm;
 pub mod magazine;
 pub mod paging;
 mod pmm;
+pub mod range_tree;
 pub mod vmm;
 pub mod vmo;
 pub mod shootdown;
