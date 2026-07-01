@@ -32,10 +32,13 @@ impl<T> Node<T> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RangeInsertError {
+pub enum RangeMapError {
     Empty, 
     Overflow,
     Overlap,
+    NotFound,
+    Mismatch,
+    InvalidAlignment,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,9 +63,9 @@ impl<T> RangeMap<T> {
 
     pub fn is_empty(&self) -> bool { self.len == 0 }
 
-    pub fn insert(&mut self, start: usize, end: usize, value: T) -> Result<(), RangeInsertError> {
-        if start >= end { return Err(RangeInsertError::Empty); }
-        if self.find_overlap(start, end).is_some() { return Err(RangeInsertError::Overlap) }
+    pub fn insert(&mut self, start: usize, end: usize, value: T) -> Result<(), RangeMapError> {
+        if start >= end { return Err(RangeMapError::Empty); }
+        if self.find_overlap(start, end).is_some() { return Err(RangeMapError::Overlap) }
 
         let root = self.root.take();
         self.root = Some(insert_node(root, start, end, value));
@@ -156,8 +159,9 @@ impl<T> RangeMap<T> {
         visit_in_order(&self.root, &mut f);
     }
 
-    pub fn first_gap(&self, size: usize, align: usize, min: usize, max: usize) -> Option<usize> {
-        if size == 0 || min >= max { return None; }
+    pub fn find_gap(&self, size: usize, align: usize, min: usize, max: usize) -> Result<Option<usize>, RangeMapError> {
+        if align == 0 { return Err(RangeMapError::InvalidAlignment); }
+        if size == 0 || min >= max { return Ok(None); }
 
         let mut cursor = min;
         let mut found = None;
@@ -193,14 +197,14 @@ impl<T> RangeMap<T> {
         });
 
         if found.is_some() {
-            return found;
+            return Ok(found);
         }
 
-        let candidate = align_up(cursor, align)?;
+        let Some(candidate) = align_up(cursor, align) else { return Ok(None); };
         if candidate.checked_add(size).is_some_and(|end| end <= max) {
-            Some(candidate)
+            Ok(Some(candidate))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -219,6 +223,33 @@ impl<T> RangeMap<T> {
         let balanced = black_height(&self.root).is_some();
         ordered && balanced && count == self.len
     }
+
+    pub fn insert_size(&mut self, start: usize, size: usize, value: T) -> Result<(), RangeMapError> {
+        if size == 0 { return Err(RangeMapError::Empty); }
+        let end = start.checked_add(size).ok_or(RangeMapError::Overflow)?;
+        self.insert(start, end, value)
+    }
+
+    pub fn get_by_start_mut(&mut self, start: usize) -> Option<(usize, usize, &mut T)> {
+        let mut current = &mut self.root;
+
+        while let Some(node) = current {
+            if start < node.start {
+                current = &mut node.left;
+            } else if start > node.start {
+                current = &mut node.right;
+            } else {
+                return Some((node.start, node.end, &mut node.value))
+            }
+        }
+        None
+    }
+
+    pub fn remove_exact(&mut self, start: usize, end: usize) -> Result<T, RangeMapError> {
+        let entry = self.get_by_start(start).ok_or(RangeMapError::NotFound)?;
+        if entry.end != end { return Err(RangeMapError::Mismatch); }
+        self.remove(start).ok_or(RangeMapError::NotFound)
+    }
 }
 
 fn visit_in_order<'a, T>(node: &'a Link<T>, f: &mut impl FnMut(RangeEntry<'a, T>)) {
@@ -236,7 +267,8 @@ fn visit_in_order<'a, T>(node: &'a Link<T>, f: &mut impl FnMut(RangeEntry<'a, T>
 }
 
 fn align_up(addr: usize, align: usize) -> Option<usize> {
-    if align <= 1 {
+    debug_assert!(align != 0);
+    if align == 1 {
         return Some(addr);
     }
 

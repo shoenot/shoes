@@ -11,6 +11,7 @@ use core::ptr::{
     write_volatile,
 };
 
+use crate::memory::range_tree::RangeRemoveError;
 use crate::memory::{
     BlockSize,
     GLOBAL_PMM,
@@ -237,13 +238,13 @@ fn test_range_tree_gap_search() {
     assert_eq!(tree.insert(0x4000, 0x5000, 2), Ok(()));
     assert_eq!(tree.insert(0x8000, 0x9000, 3), Ok(()));
 
-    assert_eq!(tree.first_gap(0x1000, 0x1000, 0x1000, 0xA000), Some(0x2000));
-    assert_eq!(tree.first_gap(0x2000, 0x1000, 0x1000, 0xA000), Some(0x2000));
-    assert_eq!(tree.first_gap(0x3000, 0x1000, 0x1000, 0xA000), Some(0x5000));
-    assert_eq!(tree.first_gap(0x2000, 0x2000, 0x1000, 0xA000), Some(0x2000));
-    assert_eq!(tree.first_gap(0x2000, 0x2000, 0x5000, 0x8000), Some(0x6000));
-    assert_eq!(tree.first_gap(0x3000, 0x2000, 0x1000, 0xA000), None);
-    assert_eq!(tree.first_gap(0x2000, 0x1000, 0x9000, 0xA000), None);
+    assert_eq!(tree.find_gap(0x1000, 0x1000, 0x1000, 0xA000), Some(0x2000));
+    assert_eq!(tree.find_gap(0x2000, 0x1000, 0x1000, 0xA000), Some(0x2000));
+    assert_eq!(tree.find_gap(0x3000, 0x1000, 0x1000, 0xA000), Some(0x5000));
+    assert_eq!(tree.find_gap(0x2000, 0x2000, 0x1000, 0xA000), Some(0x2000));
+    assert_eq!(tree.find_gap(0x2000, 0x2000, 0x5000, 0x8000), Some(0x6000));
+    assert_eq!(tree.find_gap(0x3000, 0x2000, 0x1000, 0xA000), None);
+    assert_eq!(tree.find_gap(0x2000, 0x1000, 0x9000, 0xA000), None);
 
     assert!(tree.validate());
 
@@ -300,6 +301,31 @@ fn test_range_tree_remove_stress() {
         assert_eq!(tree.remove(start), Some(i));
         assert!(tree.validate());
     }
+
+    assert!(tree.is_empty());
+    assert!(tree.validate());
+
+    klogln!("OK");
+}
+
+fn test_range_tree_helpers() {
+    klog!("  Testing range tree helpers... ");
+    let mut tree = RangeMap::new();
+
+    assert_eq!(tree.insert_size(0x1000, 0x1000, 1), Ok(()));
+    assert_eq!(tree.insert_size(usize::MAX - 0x800, 0x1000, 2), Err(RangeInsertError::Overflow));
+    assert_eq!(tree.insert_size(0x3000, 0, 3), Err(RangeInsertError::Empty));
+
+    {
+        let (_, _, value) = tree.get_by_start_mut(0x1000).expect("missing mutable range");
+        *value = 42;
+    }
+
+    assert_eq!(*tree.get(0x1000).expect("missing updated range").value, 42);
+
+    assert_eq!(tree.remove_exact(0x1000, 0x1800), Err(RangeRemoveError::Mismatch));
+    assert_eq!(tree.remove_exact(0x2000, 0x3000), Err(RangeRemoveError::NotFound));
+    assert_eq!(tree.remove_exact(0x1000, 0x2000), Ok(42));
 
     assert!(tree.is_empty());
     assert!(tree.validate());

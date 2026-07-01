@@ -79,18 +79,60 @@ macro_rules! define_bitflags {
             pub const fn remove(self, other: Self) -> Self {
                 Self(self.0 & !other.0)
             }
+
+            #[inline(always)]
+            pub const fn union(self, other: Self) -> Self {
+                Self(self.0 | other.0)
+            }
+            
+            #[inline(always)]
+            pub const fn intersection(self, other: Self) -> Self {
+                Self(self.0 & other.0)
+            }
+            
+            #[inline(always)]
+            pub const fn difference(self, other: Self) -> Self {
+                Self(self.0 & !other.0)
+            }
+            
+            #[inline(always)]
+            pub const fn complement(self) -> Self {
+                Self(!self.0)
+            }
+            
+            #[inline(always)]
+            pub const fn is_empty(self) -> bool {
+                self.0 == 0
+            }
+            
+            #[inline(always)]
+            pub const fn bits(self) -> $ty {
+                self.0
+            }
         }
 
         impl core::ops::BitOr for $name {
             type Output = Self;
             #[inline(always)]
-            fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) }
+            fn bitor(self, rhs: Self) -> Self { self.union(rhs) }
         }
 
         impl core::ops::BitAnd for $name {
             type Output = Self;
             #[inline(always)]
-            fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) }
+            fn bitand(self, rhs: Self) -> Self { self.intersection(rhs) }
+        }
+
+        impl core::ops::Not for $name {
+            type Output = Self;
+            #[inline(always)]
+            fn not(self) -> Self { self.complement() }
+        }
+
+        impl core::ops::Sub for $name {
+            type Output = Self;
+            #[inline(always)]
+            fn sub(self, rhs: Self) -> Self { self.difference(rhs) }
         }
     };
 }
