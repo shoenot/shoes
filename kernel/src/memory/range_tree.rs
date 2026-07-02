@@ -48,6 +48,12 @@ pub struct RangeEntry<'a, T> {
     pub value: &'a T,
 }
 
+impl<'a, T> RangeEntry<'a, T> {
+    pub fn size(&self) -> usize {
+        self.end - self.start
+    }
+}
+
 #[derive(Debug)]
 pub struct RangeMap<T> {
     root: Link<T>,

@@ -19,6 +19,16 @@ pub enum VmaBacking {
     Vmo(Arc<dyn PagedBackingStore>),
 }
 
+impl PartialEq for VmaBacking {
+    fn eq(&self, other: &Self) -> bool {
+        match self {
+            Self::Reserved => matches!(other, VmaBacking::Reserved),
+            Self::Anonymous => matches!(other, VmaBacking::Anonymous),
+            Self::Vmo(_) => matches!(other, VmaBacking::Vmo(_)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapBehavior {
     RequireVacant,
@@ -33,18 +43,32 @@ pub enum CachePolicy {
     Device,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PageSize {
-    Normal,
-    Huge,
+    Size4K,
+    Size2M,
+    Size1G,
 }
 
 impl PageSize {
-    pub fn bytes(&self) -> usize {
+    pub const fn bytes(&self) -> usize {
         match self {
-            Self::Normal => NORMAL_PAGE_SIZE,
-            Self::Huge   => HUGE_PAGE_SIZE,
+            Self::Size4K => 4096,
+            Self::Size2M => 512 * 4096,
+            Self::Size1G => 512 * 512 * 4096,
         }
+    }
+
+    pub const fn demoted(&self) -> Option<Self> {
+        match self {
+            Self::Size1G => Some(Self::Size2M),
+            Self::Size2M => Some(Self::Size4K),
+            Self::Size4K => None,
+        }
+    }
+
+    pub const fn is_base(&self) -> bool {
+        matches!(self, Self::Size4K)
     }
 }
 
@@ -74,7 +98,7 @@ impl VmOptions {
         Self { 
             permissions: VmPermissions::USER,
             cache: CachePolicy::Normal, 
-            page_size: PageSize::Normal, 
+            page_size: PageSize::Size4K, 
             charge: VmaChargeKind::Private,
         }
     }
@@ -83,7 +107,7 @@ impl VmOptions {
         Self { 
             permissions: VmPermissions::USER.union(VmPermissions::WRITE),
             cache: CachePolicy::Normal, 
-            page_size: PageSize::Normal, 
+            page_size: PageSize::Size4K, 
             charge: VmaChargeKind::Private,
         }
     }
@@ -92,7 +116,7 @@ impl VmOptions {
         Self { 
             permissions: VmPermissions::USER.union(VmPermissions::EXECUTE), 
             cache: CachePolicy::Normal, 
-            page_size: PageSize::Normal, 
+            page_size: PageSize::Size4K, 
             charge: VmaChargeKind::Private,
         }
     }
@@ -101,7 +125,7 @@ impl VmOptions {
         Self { 
             permissions: VmPermissions::WRITE, 
             cache: CachePolicy::Normal, 
-            page_size: PageSize::Normal, 
+            page_size: PageSize::Size4K, 
             charge: VmaChargeKind::Private,
         }
     }
@@ -110,9 +134,14 @@ impl VmOptions {
         Self { 
             permissions: VmPermissions::GUARD, 
             cache: CachePolicy::Normal, 
-            page_size: PageSize::Normal, 
+            page_size: PageSize::Size4K, 
             charge: VmaChargeKind::ReservedOnly,
         }
+    }
+
+    pub const fn with_page_size(mut self, page_size: PageSize) -> Self {
+        self.page_size = page_size;
+        self
     }
 }
 
@@ -120,6 +149,7 @@ impl VmOptions {
 pub enum VmError {
     InvalidRange,
     InvalidArgument,
+    InvalidAlignment,
     Overflow,
     Overlap,
     NotFound,
@@ -136,7 +166,7 @@ impl From<RangeMapError> for VmError {
             RangeMapError::Overlap => VmError::Overlap,
             RangeMapError::NotFound => VmError::NotFound,
             RangeMapError::Mismatch => VmError::InvalidArgument,
-            RangeMapError::InvalidAlignment => VmError::InvalidArgument,
+            RangeMapError::InvalidAlignment => VmError::InvalidAlignment,
             RangeMapError::Empty => VmError::NotFound,
         }
     }
