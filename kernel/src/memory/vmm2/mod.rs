@@ -1,10 +1,11 @@
 mod types;
 mod accounting;
+mod transaction;
 use alloc::{sync::Arc, vec::Vec};
 pub use types::*;
 pub use accounting::*;
 
-use crate::{memory::{PAGER, PCAllocator, paging::Pager, range_tree::{RangeEntry, RangeMap}}, sync::TicketLock};
+use crate::{memory::{PAGER, PCAllocator, paging::Pager, range_tree::{RangeEntry, RangeMap}, vmm2::transaction::VmaTransaction}, sync::TicketLock};
 
 pub const USER_NULL_GUARD_END:      usize = 0x0000_0000_0001_0000; // 64 KiB
 pub const USER_IMAGE_BASE:          usize = 0x0000_0000_0040_0000; // normal ELF image area
@@ -16,7 +17,6 @@ pub const USER_SPACE_LIMIT:         usize = 0x0000_8000_0000_0000; // exclusive
 
 #[derive(Debug, Clone, Copy)]
 struct NormalizedMap {
-    returned_addr:  usize,
     start:          usize,
     size:           usize,
     end:            usize,
@@ -153,25 +153,8 @@ impl VirtMemManager {
         let segments = self.collect_overlapping_vmas(range.start, range.end);
         self.require_full_coverage(range.start, range.end, &segments)?;
 
-        for segment in segments {
-            self.vmas.remove_exact(segment.start, segment.end)?;
-            let cut_start = segment.start.max(range.start);
-            let cut_end = segment.end.min(range.end);
-            let cut_size = cut_end - cut_start;
-
-            if segment.start < cut_start { self.vmas.insert(segment.start, cut_start, segment.vma.clone())?; }
-
-            // TODO: add actual page mods here
-
-            if cut_end < segment.end {
-                let right = split_right_vma(&segment.vma, segment.start, cut_end);
-                self.vmas.insert(cut_end, segment.end, right)?;
-            }
-
-            self.accounting.sub_reserved(cut_size);
-            self.accounting.sub_committed(segment.vma.committed_bytes(cut_size));
-        }
-        Ok(())
+        let tx = self.build_unmap_transaction(range.start, range.end, &segments)?;
+        self.apply_transaction(tx)
     }
 
     pub fn protect_range(&mut self, addr: usize, size: usize, permissions: VmPermissions) -> Result<(), VmError> {
@@ -183,24 +166,8 @@ impl VirtMemManager {
         let segments = self.collect_overlapping_vmas(range.start, range.end);
         self.require_full_coverage(range.start, range.end, &segments)?;
 
-        for segment in segments {
-            self.vmas.remove_exact(segment.start, segment.end)?;
-            let cut_start = segment.start.max(range.start);
-            let cut_end = segment.end.min(range.end);
-
-            if segment.start < cut_start { self.vmas.insert(segment.start, cut_start, segment.vma.clone())?; }
-
-            let mut middle = segment.vma.clone();
-            middle.permissions = permissions;
-            middle.backing_offset += cut_start - segment.start;
-            self.vmas.insert(cut_start, cut_end, middle)?;
-
-            if cut_end < segment.end {
-                let right = split_right_vma(&segment.vma, segment.start, cut_end);
-                self.vmas.insert(cut_end, segment.end, right)?;
-            }
-        }
-        Ok(())
+        let tx = self.build_protect_transaction(range.start, range.end, permissions, &segments)?;
+        self.apply_transaction(tx)
     }
 
     fn replace_contained_range(&mut self, start: usize, end: usize, replacement: Vma) -> Result<(), VmError> {
@@ -241,6 +208,78 @@ impl VirtMemManager {
         Ok(())
     }
 
+    fn build_unmap_transaction(&self, start: usize, end: usize, segments: &[VmaSegment]) -> Result<VmaTransaction, VmError> {
+        let mut tx = VmaTransaction::new();
+        for segment in segments {
+            let cut_start = segment.start.max(start);
+            let cut_end = segment.end.min(end);
+            let cut_size = cut_end - cut_start;
+
+            tx.remove(segment.start, segment.end);
+
+            if segment.start < cut_start {
+                tx.insert(segment.start, cut_start, segment.vma.clone());
+            }
+
+            if cut_end < segment.end {
+                let right = split_right_vma(&segment.vma, segment.start, cut_end);
+                tx.insert(cut_end, segment.end, right);
+            }
+
+            tx.sub_reserved(cut_size)?;
+            tx.sub_committed(segment.vma.committed_bytes(cut_size))?;
+        }
+        Ok(tx)
+    }
+
+    fn build_protect_transaction(&self, start: usize, end: usize, permissions: VmPermissions, segments: &[VmaSegment]) -> Result<VmaTransaction, VmError> {
+        let mut tx = VmaTransaction::new();
+        for segment in segments {
+            let cut_start = segment.start.max(start);
+            let cut_end = segment.end.min(end);
+
+            tx.remove(segment.start, segment.end);
+
+            if segment.start < cut_start {
+                tx.insert(segment.start, cut_start, segment.vma.clone());
+            }
+
+            let mut middle = segment.vma.clone();
+            middle.permissions = permissions;
+            middle.backing_offset += cut_start - segment.start;
+            tx.insert(cut_start, cut_end, middle);
+
+            if cut_end < segment.end {
+                let right = split_right_vma(&segment.vma, segment.start, cut_end);
+                tx.insert(cut_end, segment.end, right);
+            }
+        }
+        Ok(tx)
+    }
+
+    fn validate_transaction(&self, tx: &VmaTransaction) -> Result<(), VmError> {
+        for remove in &tx.removes {
+            let existing = self.vmas.get_by_start(remove.start).ok_or(VmError::NotFound)?;
+            if existing.end != remove.end { return Err(VmError::InvalidRange); }
+        }
+        for insert in &tx.inserts {
+            if insert.start >= insert.end { return Err(VmError::InvalidRange); }
+        }
+        Ok(())
+    }
+
+    fn apply_transaction(&mut self, tx: VmaTransaction) -> Result<(), VmError> {
+        self.validate_transaction(&tx)?;
+        for remove in &tx.removes {
+            self.vmas.remove_exact(remove.start, remove.end)?;
+        }
+        for insert in tx.inserts {
+            self.vmas.insert(insert.start, insert.end, insert.vma)?;
+        }
+        self.accounting.sub_reserved(tx.accounting.reserved_sub);
+        self.accounting.sub_committed(tx.accounting.committed_sub);
+        Ok(())
+    }
 
     fn demote_segment_once( &mut self, segment: &VmaSegment, target_start: usize, target_end: usize) -> Result<bool, VmError> {
         // only demotes the affected page, not the whole vma. so a big vma gets split into smaller
@@ -370,6 +409,10 @@ fn required_granularity_for_range(start: usize, end: usize) -> PageSize {
 fn normalize_map_request(addr: usize, size: usize, backing_offset: usize, page_size: PageSize) -> Result<NormalizedMap, VmError> {
     if size == 0 { return Err(VmError::InvalidRange); }
     let align = page_size.bytes();
+    
+    if addr & (align - 1) != 0 { return Err(VmError::InvalidArgument); }
+    if backing_offset & (align - 1) != 0 { return Err(VmError::InvalidArgument); }
+
     let page_offset = addr & (align - 1);
     let start = align_down(addr, align);
     if start < USER_NULL_GUARD_END { return Err(VmError::InvalidRange); }
@@ -382,7 +425,7 @@ fn normalize_map_request(addr: usize, size: usize, backing_offset: usize, page_s
 
     let backing_offset = backing_offset.checked_sub(page_offset).ok_or(VmError::InvalidArgument)?;
     
-    Ok(NormalizedMap { returned_addr: addr, start, size, end, backing_offset })
+    Ok(NormalizedMap { start, size, end, backing_offset })
 }
 
 fn normalize_range(addr: usize, size: usize, page_size: PageSize) -> Result<NormalizedRange, VmError> {

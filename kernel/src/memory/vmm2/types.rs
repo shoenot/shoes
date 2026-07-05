@@ -1,6 +1,6 @@
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 use vespertine_abi::define_bitflags;
-use crate::memory::{HUGE_PAGE_SIZE, NORMAL_PAGE_SIZE, range_tree::RangeMapError, vmo::PagedBackingStore};
+use crate::memory::{HUGE_PAGE_SIZE, NORMAL_PAGE_SIZE, range_tree::RangeMapError, vmm2::Vma, vmo::PagedBackingStore};
 
 define_bitflags! {
     pub struct VmPermissions(u16) {
