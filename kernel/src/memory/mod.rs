@@ -23,6 +23,7 @@ use hal::interrupts::{
     enable_interrupts,
     interrupts_enabled,
 };
+use hal::mmu::FrameAllocator;
 use heap::*;
 use paging::*;
 use pmm::*;
@@ -35,16 +36,12 @@ use vespertine_common::slab::SlabAllocator;
 use vmm::*;
 
 use crate::cpu::current_core_mut;
-use crate::sync::{
-    KernelOnceCell,
-    TicketLock,
-};
+use crate::sync::TicketLock;
 use crate::process::current_process;
 use crate::{
     klogln,
 };
-
-pub static DIRECT_MAP_OFFSET: KernelOnceCell<usize> = KernelOnceCell::new();
+pub use hal::mmu::{PhysAddr, VirtAddr, PageSize, DIRECT_MAP_OFFSET, pager::{PagerError}};
 
 // wrapper that disables interrupts and reenables them (needed bc the slab code was moved to common
 pub struct KernelAllocatorWrapper(SlabAllocator<KernelPageProvider>);
@@ -140,9 +137,19 @@ impl PCAllocator {
     pub fn free_order(&self, addr: usize, order: usize) { GLOBAL_PMM.lock().free_order(addr, order) }
 }
 
+impl FrameAllocator for PCAllocator {
+    fn allocate_frame(&mut self) -> Option<usize> {
+        Some(self.alloc(BlockSize::Normal))
+    }
+
+    fn deallocate_frame(&mut self, phys_addr: usize) {
+        self.free(phys_addr, BlockSize::Normal)
+    }
+}
+
 pub fn init() {
     klogln!("[INFO] Initiating memory management system...");
-    DIRECT_MAP_OFFSET.get_or_init(|| direct_map_offset());
+    hal::mmu::init_direct_map_offset(direct_map_offset());
     // Inititate PMM
     {
         let mut global_pmm = GLOBAL_PMM.lock();

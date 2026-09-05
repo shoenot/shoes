@@ -8,7 +8,7 @@ enum Color {
     Black,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node<T> {
     start: usize,
     end: usize,
@@ -54,7 +54,7 @@ impl<'a, T> RangeEntry<'a, T> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RangeMap<T> {
     root: Link<T>,
     len: usize,

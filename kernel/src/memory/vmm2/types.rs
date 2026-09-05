@@ -1,6 +1,6 @@
-use alloc::{sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use vespertine_abi::define_bitflags;
-use crate::memory::{HUGE_PAGE_SIZE, NORMAL_PAGE_SIZE, range_tree::RangeMapError, vmm2::Vma, vmo::PagedBackingStore};
+use crate::memory::{range_tree::RangeMapError, vmo::PagedBackingStore, PageSize};
 
 define_bitflags! {
     pub struct VmPermissions(u16) {
@@ -9,6 +9,16 @@ define_bitflags! {
         USER        = 1 << 2;
         GLOBAL      = 1 << 3;
         GUARD       = 1 << 4;
+    }
+}
+
+impl VmPermissions {
+    pub fn to_hardware_flags(&self) -> hal::mmu::PageFlags {
+        let mut flags = hal::mmu::PageFlags(0);
+        if self.contains(VmPermissions::WRITE) { flags = flags.insert(hal::mmu::PageFlags::WRITABLE); }
+        if self.contains(VmPermissions::USER) { flags = flags.insert(hal::mmu::PageFlags::USER_ACCESSIBLE); }
+        if !self.contains(VmPermissions::EXECUTE) { flags = flags.insert(hal::mmu::PageFlags::NO_EXECUTE); }
+        flags
     }
 }
 
@@ -41,35 +51,6 @@ pub enum CachePolicy {
     WriteThrough,
     Uncached,
     Device,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PageSize {
-    Size4K,
-    Size2M,
-    Size1G,
-}
-
-impl PageSize {
-    pub const fn bytes(&self) -> usize {
-        match self {
-            Self::Size4K => 4096,
-            Self::Size2M => 512 * 4096,
-            Self::Size1G => 512 * 512 * 4096,
-        }
-    }
-
-    pub const fn demoted(&self) -> Option<Self> {
-        match self {
-            Self::Size1G => Some(Self::Size2M),
-            Self::Size2M => Some(Self::Size4K),
-            Self::Size4K => None,
-        }
-    }
-
-    pub const fn is_base(&self) -> bool {
-        matches!(self, Self::Size4K)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -20,7 +20,8 @@ use crate::memory::{
     range_tree::{
         RangeMap,
         RangeMapError,
-    }
+    },
+    PageSize
 };
 
 use crate::{
