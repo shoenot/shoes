@@ -14,14 +14,13 @@ use core::ptr::{
 use crate::memory::{ALLOCATOR, NORMAL_PAGE_SIZE};
 use crate::memory::vmm::*;
 use crate::memory::{
-    BlockSize,
+    PageSize,
     GLOBAL_PMM,
     HUGE_PAGE_SIZE,
     range_tree::{
         RangeMap,
         RangeMapError,
     },
-    PageSize
 };
 
 use crate::{
@@ -163,11 +162,11 @@ fn test_huge_alignment() {
     klog!("  Testing huge page alignment... ");
     let mut pmm = GLOBAL_PMM.lock();
 
-    let huge_frame = pmm.alloc(BlockSize::Huge).expect("Failed to allocate Huge Page");
+    let huge_frame = pmm.alloc(PageSize::Size2M).expect("Failed to allocate Huge Page");
 
     assert_eq!(huge_frame % HUGE_PAGE_SIZE, 0, "Alignment fault! {:#X} is not 2MB aligned.", huge_frame);
 
-    pmm.free(huge_frame, BlockSize::Huge);
+    pmm.free(huge_frame, PageSize::Size2M);
     klogln!("OK");
 }
 
@@ -176,13 +175,13 @@ fn test_freelist_isolation() {
     let mut pmm = GLOBAL_PMM.lock();
 
     // Allocate two blocks, ensure the allocator doesn't hand out the same frame twice.
-    let block1 = pmm.alloc(BlockSize::Normal).unwrap();
-    let block2 = pmm.alloc(BlockSize::Normal).unwrap();
+    let block1 = pmm.alloc(PageSize::Size4K).unwrap();
+    let block2 = pmm.alloc(PageSize::Size4K).unwrap();
 
     assert!(block1 != block2, "Allocator handed out the same frame twice! {:#X}", block1);
 
-    pmm.free(block1, BlockSize::Normal);
-    pmm.free(block2, BlockSize::Normal);
+    pmm.free(block1, PageSize::Size4K);
+    pmm.free(block2, PageSize::Size4K);
     klogln!("OK");
 }
 
@@ -349,6 +348,7 @@ pub fn run_vmm2_tests() {
     test_vmm2_precise_2m_protect_only_demotes_touched_chunk();
     test_vmm2_precise_1g_to_4k_unmap_keeps_untouched_2m_chunks();
     test_vmm2_precise_1g_to_4k_protect_keeps_untouched_2m_chunks();
+    test_vmm2_transaction_stress();
 
     klogln!("ALL VMM2 TESTS PASSED!");
 }
@@ -811,6 +811,53 @@ fn test_vmm2_precise_1g_to_4k_protect_keeps_untouched_2m_chunks() {
     let snapshot = vmm.accounting().snapshot();
     assert_eq!(snapshot.reserved_bytes, one_gib);
     assert_eq!(snapshot.committed_bytes, one_gib);
+
+    klogln!("OK");
+}
+
+fn test_vmm2_transaction_stress() {
+    klog!("  Testing vmm2 transaction stress pipeline... ");
+
+    let mut vmm = VirtMemManager::new(&ALLOCATOR);
+    let page = NORMAL_PAGE_SIZE;
+    let huge = HUGE_PAGE_SIZE;
+    let size_10m = 10 * huge;
+
+    let before = vmm.accounting().snapshot();
+
+    // reserve 10mb
+    let base = vmm.reserve(size_10m, VmOptions::user_rw(), VmaBacking::Reserved)
+        .expect("Failed to reserve 10MB");
+
+    // map 2mb exactly in the center
+    assert_eq!(
+        vmm.map_at(base + huge * 2, huge, VmOptions::user_rw(), VmaBacking::Anonymous, 0, MapBehavior::ReplaceContained),
+        Ok(base + huge * 2)
+    );
+
+    // protect exactly 4k inside that 2mb chunk to ro
+    assert_eq!(
+        vmm.protect_range(base + huge * 2 + page, page, VmOptions::user_ro().permissions),
+        Ok(())
+    );
+
+    // protect the entire 10mb block back to read-write
+    assert_eq!(
+        vmm.protect_range(base, size_10m, VmOptions::user_rw().permissions),
+        Ok(())
+    );
+
+    // unmap everything
+    assert_eq!(
+        vmm.unmap_range(base, size_10m),
+        Ok(())
+    );
+
+    assert!(vmm.validate());
+
+    let after = vmm.accounting().snapshot();
+    assert_eq!(before.reserved_bytes, after.reserved_bytes);
+    assert_eq!(before.committed_bytes, after.committed_bytes);
 
     klogln!("OK");
 }

@@ -26,7 +26,6 @@ use hal::mmu::pager::{PageTable, Pager};
 use heap::*;
 use pmm::*;
 pub use pmm::{
-    BlockSize,
     HUGE_PAGE_SIZE,
     NORMAL_PAGE_SIZE,
 };
@@ -105,10 +104,10 @@ pub enum FaultError {
 pub struct PCAllocator {}
 
 impl PCAllocator {
-    pub fn alloc(&self, size: BlockSize) -> usize {
+    pub fn alloc(&self, size: PageSize) -> usize {
         match size {
-            BlockSize::Huge => GLOBAL_PMM.lock().alloc(size).expect("[FATAL] Global PMM Exhausted"),
-            BlockSize::Normal => {
+            PageSize::Size2M => GLOBAL_PMM.lock().alloc(size).expect("[FATAL] Global PMM Exhausted"),
+            PageSize::Size4K => {
                 let int_state = interrupts_enabled();
                 disable_interrupts();
                 let ret = current_core_mut().magazine.alloc();
@@ -116,25 +115,25 @@ impl PCAllocator {
                     enable_interrupts();
                 }
                 ret
-            }
+            },
+            PageSize::Size1G => unimplemented!(),
         }
     }
 
     pub fn alloc_order(&self, order: usize) -> Option<usize> { GLOBAL_PMM.lock().alloc_order(order) }
 
-    pub fn free(&self, addr: usize, size: BlockSize) {
+    pub fn free(&self, addr: usize, size: PageSize) {
         match size {
-            BlockSize::Huge => {
-                GLOBAL_PMM.lock().free(addr, size);
-            }
-            BlockSize::Normal => {
+            PageSize::Size2M => GLOBAL_PMM.lock().free(addr, size),
+            PageSize::Size4K => {
                 let int_state = interrupts_enabled();
                 disable_interrupts();
                 current_core_mut().magazine.free(addr);
                 if int_state {
                     enable_interrupts();
                 }
-            }
+            },
+            PageSize::Size1G => unimplemented!(),
         }
     }
 
@@ -143,11 +142,11 @@ impl PCAllocator {
 
 impl FrameAllocator for PCAllocator {
     fn allocate_frame(&mut self) -> Option<usize> {
-        Some(self.alloc(BlockSize::Normal))
+        Some(self.alloc(PageSize::Size4K))
     }
 
     fn deallocate_frame(&mut self, phys_addr: usize) {
-        self.free(phys_addr, BlockSize::Normal)
+        self.free(phys_addr, PageSize::Size4K)
     }
 }
 
@@ -164,7 +163,7 @@ pub fn init() {
     {
         let boot_cr3 = get_cr3() & 0x000F_FFFF_FFFF_F000;
 
-        let new_pml4 = GLOBAL_PMM.lock().alloc(BlockSize::Normal).expect("Failed to allocate kernel PML4");
+        let new_pml4 = GLOBAL_PMM.lock().alloc(PageSize::Size4K).expect("Failed to allocate kernel PML4");
 
         unsafe { PageTable::from_phys(PhysAddr(new_pml4)).zero(); }
         let mut kernel_pager = Pager::new(PhysAddr(new_pml4));

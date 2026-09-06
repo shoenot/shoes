@@ -7,7 +7,7 @@ use vespertine_common::slab::{
 
 use crate::memory::{
     ALLOCATOR,
-    BlockSize,
+    PageSize,
     DIRECT_MAP_OFFSET,
 };
 
@@ -17,7 +17,7 @@ impl PageProvider for KernelPageProvider {
     fn allocate_pages(&self, size: usize) -> *mut u8 {
         // slab page reqs are normalized to 4kb
         if size <= 4096 {
-            let phys = ALLOCATOR.alloc(BlockSize::Normal);
+            let phys = ALLOCATOR.alloc(PageSize::Size4K);
             return (phys + *DIRECT_MAP_OFFSET) as *mut u8;
         } else {
             // large allocations go directly to the buddy
@@ -36,7 +36,7 @@ impl PageProvider for KernelPageProvider {
         }
         let phys = ptr as usize - *DIRECT_MAP_OFFSET;
         if size <= 4096 {
-            ALLOCATOR.free(phys, BlockSize::Normal);
+            ALLOCATOR.free(phys, PageSize::Size4K);
         } else {
             let pages = (size + 4095) / 4096;
             let order = pages.next_power_of_two().trailing_zeros() as usize;

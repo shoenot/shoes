@@ -5,6 +5,8 @@ use core::sync::atomic::{
     Ordering,
 };
 
+use hal::mmu::PageSize;
+
 pub use crate::memory::DIRECT_MAP_OFFSET;
 use crate::memory::init_pmm::*;
 
@@ -23,12 +25,6 @@ pub const PF_BUDDY_HEAD: u16 = 1 << 5;
 struct FreeBlock {
     prev: usize,
     next: usize,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum BlockSize {
-    Normal,
-    Huge,
 }
 
 pub struct PageFrame {
@@ -105,10 +101,11 @@ impl Allocator {
         }
     }
 
-    pub fn alloc(&mut self, size: BlockSize) -> Option<usize> {
+    pub fn alloc(&mut self, size: PageSize) -> Option<usize> {
         let order = match size {
-            BlockSize::Huge => 9,
-            BlockSize::Normal => 0,
+            PageSize::Size2M => 9,
+            PageSize::Size4K => 0,
+            PageSize::Size1G => unimplemented!(),
         };
         self.alloc_order(order)
     }
@@ -185,10 +182,11 @@ impl Allocator {
         }
     }
 
-    pub fn free(&mut self, block_addr: usize, size: BlockSize) {
+    pub fn free(&mut self, block_addr: usize, size: PageSize) {
         let order = match size {
-            BlockSize::Huge => 9,
-            BlockSize::Normal => 0,
+            PageSize::Size2M => 9,
+            PageSize::Size4K => 0,
+            PageSize::Size1G => unimplemented!(),
         };
         self.free_order(block_addr, order);
     }

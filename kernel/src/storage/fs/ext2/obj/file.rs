@@ -27,7 +27,7 @@ use crate::memory::vmo::{
 };
 use crate::memory::{
     ALLOCATOR,
-    BlockSize,
+    PageSize,
     DIRECT_MAP_OFFSET,
 };
 use crate::storage::fs::ext2::Ext2FileSystem;
@@ -232,13 +232,13 @@ impl Ext2File {
                 let block_id = self.fs.resolve_file_block(&inode, block_index).await.map_err(|_| InvocationError::UnsupportedOperation)?;
 
                 if block_id != 0 {
-                    let page = ALLOCATOR.alloc(BlockSize::Normal);
+                    let page = ALLOCATOR.alloc(PageSize::Size4K);
                     if page == 0 {
                         return Err(InvocationError::OutOfMemory);
                     }
 
                     if self.fs.read_block(block_id, page as u64).await.is_err() {
-                        ALLOCATOR.free(page, BlockSize::Normal);
+                        ALLOCATOR.free(page, PageSize::Size4K);
                         return Err(InvocationError::UnsupportedOperation);
                     }
 
@@ -247,11 +247,11 @@ impl Ext2File {
                     }
 
                     if self.fs.cache.write_block(block_id as usize, page as u64).await.is_err() {
-                        ALLOCATOR.free(page, BlockSize::Normal);
+                        ALLOCATOR.free(page, PageSize::Size4K);
                         return Err(InvocationError::UnsupportedOperation);
                     }
 
-                    ALLOCATOR.free(page, BlockSize::Normal);
+                    ALLOCATOR.free(page, PageSize::Size4K);
                 }
             }
 

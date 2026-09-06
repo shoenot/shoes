@@ -86,7 +86,7 @@ impl Debug for VirtMemManager {
 
 impl VirtMemManager {
     pub fn new(allocator: &'static PCAllocator) -> Self {
-        let pml4_frame = allocator.alloc(super::BlockSize::Normal);
+        let pml4_frame = allocator.alloc(super::PageSize::Size4K);
         unsafe { PageTable::from_phys(PhysAddr(pml4_frame)).zero(); }
 
         let mut pager = Pager::new(PhysAddr(pml4_frame));
@@ -466,7 +466,7 @@ impl VirtMemManager {
                 vmo.request_page(backing_offset).map_err(|_| FaultError::OutOfMemory)?
             },
             VmaBacking::Anonymous => {
-                let pfn = ALLOCATOR.alloc(super::BlockSize::Normal);
+                let pfn = ALLOCATOR.alloc(super::PageSize::Size4K);
                 if pfn == 0 { return Err(FaultError::OutOfMemory); }
                 unsafe { core::ptr::write_bytes((pfn + *DIRECT_MAP_OFFSET) as *mut u8, 0, 4096); }
                 pfn

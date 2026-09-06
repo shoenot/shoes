@@ -48,7 +48,7 @@ use crate::drivers::virtio::mmio::{
 use crate::interrupts::alloc::MsiHandle;
 use crate::memory::{
     ALLOCATOR,
-    BlockSize,
+    PageSize,
     DIRECT_MAP_OFFSET,
 };
 use crate::storage::blockdev::{
@@ -387,14 +387,14 @@ fn free_submission_resources(vq: &mut Virtqueue, page_phys: usize, descs: &[u16]
     for &desc in descs.iter().rev() {
         vq.free_desc(desc);
     }
-    crate::memory::ALLOCATOR.free(page_phys, BlockSize::Normal);
+    crate::memory::ALLOCATOR.free(page_phys, PageSize::Size4K);
 }
 
 fn alloc_request_descs(vq: &mut Virtqueue, page_phys: usize) -> Result<(u16, u16, u16), ()> {
     let d0 = match vq.alloc_desc() {
         Ok(d) => d as u16,
         Err(_) => {
-            crate::memory::ALLOCATOR.free(page_phys, BlockSize::Normal);
+            crate::memory::ALLOCATOR.free(page_phys, PageSize::Size4K);
             return Err(());
         }
     };
@@ -445,7 +445,7 @@ fn complete_request(vq: &mut Virtqueue, request: &Arc<BlockRequest>, status: u8)
     vq.free_desc(request.d1);
     vq.free_desc(request.d2);
 
-    crate::memory::ALLOCATOR.free(request.page_phys, BlockSize::Normal);
+    crate::memory::ALLOCATOR.free(request.page_phys, PageSize::Size4K);
 }
 
 pub const VIRTIO_BLK_T_IN: u32 = 0; // READ
@@ -567,7 +567,7 @@ impl VirtioBlockDevice {
         let vq_state = &self.queues[vq_idx];
 
         unsafe {
-            let page_phys = crate::memory::ALLOCATOR.alloc(BlockSize::Normal);
+            let page_phys = crate::memory::ALLOCATOR.alloc(PageSize::Size4K);
             if page_phys == 0 {
                 return Err(());
             };

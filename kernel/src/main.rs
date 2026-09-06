@@ -33,7 +33,7 @@ use hal::interrupts::enable_interrupts;
 use hal::mmu::get_cr3;
 use memory::{
     BOOTSTRAP_ALLOC,
-    BlockSize,
+    PageSize,
 };
 pub use vespertine_common::define_bitflags;
 
@@ -59,7 +59,7 @@ pub extern "C" fn kmain() -> ! {
     LOGGER.lock().init();
 
     memory::init();
-    let bootstrap_page = GLOBAL_PMM.lock().alloc(BlockSize::Huge).unwrap() as usize;
+    let bootstrap_page = GLOBAL_PMM.lock().alloc(PageSize::Size2M).unwrap() as usize;
     BOOTSTRAP_ALLOC.lock().init(bootstrap_page);
 
     interrupts::init();

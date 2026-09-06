@@ -50,7 +50,7 @@ use crate::time::get_realtime;
 use crate::memory::vmo::FileVmo;
 use crate::memory::{
     ALLOCATOR,
-    BlockSize,
+    PageSize,
     DIRECT_MAP_OFFSET,
 };
 use crate::storage::fs::VfsNode;
@@ -118,7 +118,7 @@ impl KernelObject for Ext2Directory {
             Invocation::Directory(DirectoryOp::List { offset: _, sink }) => {
                 let mut entries = alloc::vec::Vec::new();
 
-                let page_phys = ALLOCATOR.alloc(BlockSize::Normal);
+                let page_phys = ALLOCATOR.alloc(PageSize::Size4K);
                 if page_phys == 0 {
                     return Err(InvocationError::OutOfMemory);
                 }
@@ -131,7 +131,7 @@ impl KernelObject for Ext2Directory {
                     };
 
                     if self.fs.read_block(block_id, page_phys as u64).await.is_err() {
-                        ALLOCATOR.free(page_phys, BlockSize::Normal);
+                        ALLOCATOR.free(page_phys, PageSize::Size4K);
                         return Err(InvocationError::InvalidPointer);
                     }
 
@@ -161,7 +161,7 @@ impl KernelObject for Ext2Directory {
                         }
                     }
                 }
-                ALLOCATOR.free(page_phys, BlockSize::Normal);
+                ALLOCATOR.free(page_phys, PageSize::Size4K);
 
                 // resolve sink socket
                 let proc = current_process().ok_or(InvocationError::InvalidHandle)?;
@@ -350,7 +350,7 @@ impl KernelDirectory for Ext2Directory {
             let double_indirect = unsafe { child_inode.data.blocks.double_indirect };
             if double_indirect != 0 {
                 let mut sub_blocks = alloc::vec::Vec::new();
-                let page_phys = ALLOCATOR.alloc(BlockSize::Normal);
+                let page_phys = ALLOCATOR.alloc(PageSize::Size4K);
                 if page_phys != 0 {
                     let page_virt = page_phys + *DIRECT_MAP_OFFSET;
                     if self.fs.read_block(double_indirect, page_phys as u64).await.is_ok() {
@@ -365,7 +365,7 @@ impl KernelDirectory for Ext2Directory {
                             }
                         }
                     }
-                    ALLOCATOR.free(page_phys, BlockSize::Normal);
+                    ALLOCATOR.free(page_phys, PageSize::Size4K);
                 }
                 for sub_block in sub_blocks {
                     let _ = self.fs.free_block(sub_block).await;
@@ -378,7 +378,7 @@ impl KernelDirectory for Ext2Directory {
                 let mut d_blocks = alloc::vec::Vec::new();
                 let mut s_blocks = alloc::vec::Vec::new();
 
-                let page_phys = ALLOCATOR.alloc(BlockSize::Normal);
+                let page_phys = ALLOCATOR.alloc(PageSize::Size4K);
                 if page_phys != 0 {
                     let page_virt = page_phys + *DIRECT_MAP_OFFSET;
                     if self.fs.read_block(triple_indirect, page_phys as u64).await.is_ok() {
@@ -393,11 +393,11 @@ impl KernelDirectory for Ext2Directory {
                             }
                         }
                     }
-                    ALLOCATOR.free(page_phys, BlockSize::Normal);
+                    ALLOCATOR.free(page_phys, PageSize::Size4K);
                 }
 
                 for &d_block in &d_blocks {
-                    let page_phys_sub = ALLOCATOR.alloc(BlockSize::Normal);
+                    let page_phys_sub = ALLOCATOR.alloc(PageSize::Size4K);
                     if page_phys_sub != 0 {
                         let page_virt_sub = page_phys_sub + *DIRECT_MAP_OFFSET;
                         if self.fs.read_block(d_block, page_phys_sub as u64).await.is_ok() {
@@ -412,7 +412,7 @@ impl KernelDirectory for Ext2Directory {
                                 }
                             }
                         }
-                        ALLOCATOR.free(page_phys_sub, BlockSize::Normal);
+                        ALLOCATOR.free(page_phys_sub, PageSize::Size4K);
                     }
                 }
 
@@ -510,7 +510,7 @@ impl KernelDirectory for Ext2Directory {
 
         let block_id = self.fs.allocate_block().await.map_err(|_| InvocationError::OutOfMemory)?;
 
-        let page_phys = ALLOCATOR.alloc(BlockSize::Normal);
+        let page_phys = ALLOCATOR.alloc(PageSize::Size4K);
         if page_phys == 0 {
             return Err(InvocationError::OutOfMemory);
         }
@@ -557,7 +557,7 @@ impl KernelDirectory for Ext2Directory {
             Ok(fut) => fut.await,
             Err(_) => Err(()),
         };
-        ALLOCATOR.free(page_phys, BlockSize::Normal);
+        ALLOCATOR.free(page_phys, PageSize::Size4K);
         if write_result.is_err() {
             return Err(InvocationError::UnsupportedOperation);
         }
@@ -631,7 +631,7 @@ impl Ext2Directory {
         let needed_len = (8 + name_bytes.len() + 3) & !3;
         let block_size = self.fs.block_size as usize;
 
-        let page_phys = ALLOCATOR.alloc(BlockSize::Normal);
+        let page_phys = ALLOCATOR.alloc(PageSize::Size4K);
         if page_phys == 0 {
             return Err(());
         }
@@ -682,7 +682,7 @@ impl Ext2Directory {
                             copy_nonoverlapping(name_bytes.as_ptr(), new_name_ptr, name_bytes.len());
 
                             self.fs.cache.write_block(block_id as usize, page_phys as u64).await?;
-                            ALLOCATOR.free(page_phys, BlockSize::Normal);
+                            ALLOCATOR.free(page_phys, PageSize::Size4K);
                             return Ok(());
                         }
                     }
@@ -694,7 +694,7 @@ impl Ext2Directory {
         let new_block_id = match self.fs.allocate_block().await {
             Ok(id) => id,
             Err(_) => {
-                ALLOCATOR.free(page_phys, BlockSize::Normal);
+                ALLOCATOR.free(page_phys, PageSize::Size4K);
                 return Err(());
             }
         };
@@ -720,7 +720,7 @@ impl Ext2Directory {
             }
         };
         if write_result.is_err() {
-            ALLOCATOR.free(page_phys, BlockSize::Normal);
+            ALLOCATOR.free(page_phys, PageSize::Size4K);
             return Err(());
         }
 
@@ -805,7 +805,7 @@ impl Ext2Directory {
                         }
                         self.fs.partition.write_sectors(s, self.fs.sectors_per_block, page_phys as u64)?.await?;
 
-                        let page_phys_sub = ALLOCATOR.alloc(BlockSize::Normal);
+                        let page_phys_sub = ALLOCATOR.alloc(PageSize::Size4K);
                         if page_phys_sub == 0 {
                             return Err(());
                         }
@@ -814,7 +814,7 @@ impl Ext2Directory {
                         }
                         let sub_s = single_indirect as u64 * self.fs.sectors_per_block as u64;
                         self.fs.partition.write_sectors(sub_s, self.fs.sectors_per_block, page_phys_sub as u64)?.await?;
-                        ALLOCATOR.free(page_phys_sub, BlockSize::Normal);
+                        ALLOCATOR.free(page_phys_sub, PageSize::Size4K);
                     }
 
                     let sub_s = single_indirect as u64 * self.fs.sectors_per_block as u64;
@@ -867,7 +867,7 @@ impl Ext2Directory {
                         }
                         self.fs.partition.write_sectors(s, self.fs.sectors_per_block, page_phys as u64)?.await?;
 
-                        let page_phys_sub = ALLOCATOR.alloc(BlockSize::Normal);
+                        let page_phys_sub = ALLOCATOR.alloc(PageSize::Size4K);
                         if page_phys_sub == 0 {
                             return Err(());
                         }
@@ -876,7 +876,7 @@ impl Ext2Directory {
                         }
                         let sub_s = double_indirect as u64 * self.fs.sectors_per_block as u64;
                         self.fs.partition.write_sectors(sub_s, self.fs.sectors_per_block, page_phys_sub as u64)?.await?;
-                        ALLOCATOR.free(page_phys_sub, BlockSize::Normal);
+                        ALLOCATOR.free(page_phys_sub, PageSize::Size4K);
                     }
 
                     let sub_s = double_indirect as u64 * self.fs.sectors_per_block as u64;
@@ -899,7 +899,7 @@ impl Ext2Directory {
                         }
                         self.fs.partition.write_sectors(sub_s, self.fs.sectors_per_block, page_phys as u64)?.await?;
 
-                        let page_phys_sub = ALLOCATOR.alloc(BlockSize::Normal);
+                        let page_phys_sub = ALLOCATOR.alloc(PageSize::Size4K);
                         if page_phys_sub == 0 {
                             return Err(());
                         }
@@ -908,7 +908,7 @@ impl Ext2Directory {
                         }
                         let sub2_s = single_indirect as u64 * self.fs.sectors_per_block as u64;
                         self.fs.partition.write_sectors(sub2_s, self.fs.sectors_per_block, page_phys_sub as u64)?.await?;
-                        ALLOCATOR.free(page_phys_sub, BlockSize::Normal);
+                        ALLOCATOR.free(page_phys_sub, PageSize::Size4K);
                     }
 
                     let sub2_s = single_indirect as u64 * self.fs.sectors_per_block as u64;
@@ -926,7 +926,7 @@ impl Ext2Directory {
         };
 
         if map_result.is_err() {
-            ALLOCATOR.free(page_phys, BlockSize::Normal);
+            ALLOCATOR.free(page_phys, PageSize::Size4K);
             return Err(());
         }
 
@@ -936,7 +936,7 @@ impl Ext2Directory {
         let num = self.inode_num;
         let save_result = self.fs.write_inode(num, &*inode_write).await;
 
-        ALLOCATOR.free(page_phys, BlockSize::Normal);
+        ALLOCATOR.free(page_phys, PageSize::Size4K);
         save_result
     }
 
@@ -947,7 +947,7 @@ impl Ext2Directory {
         }
 
         let block_size = self.fs.block_size as usize;
-        let page_phys = ALLOCATOR.alloc(BlockSize::Normal);
+        let page_phys = ALLOCATOR.alloc(PageSize::Size4K);
         if page_phys == 0 {
             return Err(());
         }
@@ -964,7 +964,7 @@ impl Ext2Directory {
             }
 
             if self.fs.read_block(block_id, page_phys as u64).await.is_err() {
-                ALLOCATOR.free(page_phys, BlockSize::Normal);
+                ALLOCATOR.free(page_phys, PageSize::Size4K);
                 return Err(());
             }
 
@@ -993,11 +993,11 @@ impl Ext2Directory {
                             }
 
                             if self.fs.cache.write_block(block_id as usize, page_phys as u64).await.is_err() {
-                                ALLOCATOR.free(page_phys, BlockSize::Normal);
+                                ALLOCATOR.free(page_phys, PageSize::Size4K);
                                 return Err(());
                             }
 
-                            ALLOCATOR.free(page_phys, BlockSize::Normal);
+                            ALLOCATOR.free(page_phys, PageSize::Size4K);
                             return Ok(());
                         }
                     }
@@ -1008,7 +1008,7 @@ impl Ext2Directory {
             }
         }
 
-        ALLOCATOR.free(page_phys, BlockSize::Normal);
+        ALLOCATOR.free(page_phys, PageSize::Size4K);
         Err(())
     }
 }

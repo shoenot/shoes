@@ -23,7 +23,7 @@ use crate::memory::pmm::{
 };
 use crate::memory::{
     ALLOCATOR,
-    BlockSize,
+    PageSize,
     GLOBAL_PMM,
     DIRECT_MAP_OFFSET,
 };
@@ -69,7 +69,7 @@ impl PagedBackingStore for Vmo {
         }
 
         // allocate directly from the pmm
-        let pfn = ALLOCATOR.alloc(BlockSize::Normal);
+        let pfn = ALLOCATOR.alloc(PageSize::Size4K);
         if pfn != 0 {
             unsafe {
                 core::ptr::write_bytes((pfn + *DIRECT_MAP_OFFSET) as *mut u8, 0, NORMAL_PAGE_SIZE);
@@ -96,7 +96,7 @@ impl PagedBackingStore for Vmo {
             for (&offset, &pfn) in pages.iter() {
                 if offset >= new_size {
                     if pfn != 0 {
-                        ALLOCATOR.free(pfn, BlockSize::Normal);
+                        ALLOCATOR.free(pfn, PageSize::Size4K);
                     }
                     to_remove.push(offset);
                 }
@@ -135,7 +135,7 @@ impl PagedBackingStore for Vmo {
             let page_offset = i * NORMAL_PAGE_SIZE;
             let parent_offset = offset + page_offset;
 
-            let child_pfn = ALLOCATOR.alloc(BlockSize::Normal);
+            let child_pfn = ALLOCATOR.alloc(PageSize::Size4K);
             unsafe {
                 write_bytes((child_pfn + *DIRECT_MAP_OFFSET) as *mut u8, 0, NORMAL_PAGE_SIZE);
             }
@@ -268,7 +268,7 @@ impl Drop for Vmo {
         let pages = self.pages.lock();
         for (&_offset, &pfn) in pages.iter() {
             if pfn != 0 {
-                ALLOCATOR.free(pfn, BlockSize::Normal);
+                ALLOCATOR.free(pfn, PageSize::Size4K);
             }
         }
     }
@@ -355,7 +355,7 @@ impl PagedBackingStore for FileVmo {
         }
 
         // cache miss
-        let page_phys = ALLOCATOR.alloc(BlockSize::Normal) as usize;
+        let page_phys = ALLOCATOR.alloc(PageSize::Size4K) as usize;
         if page_phys == 0 {
             return Err(());
         }
@@ -363,7 +363,7 @@ impl PagedBackingStore for FileVmo {
         let node = match self.node.upgrade() {
             Some(n) => n,
             None => {
-                ALLOCATOR.free(page_phys, BlockSize::Normal);
+                ALLOCATOR.free(page_phys, PageSize::Size4K);
                 return Err(());
             }
         };
@@ -372,7 +372,7 @@ impl PagedBackingStore for FileVmo {
         let bytes_read = match block_on(Box::pin(read_fut)) {
             Ok(bytes) => bytes,
             Err(_) => {
-                ALLOCATOR.free(page_phys, BlockSize::Normal);
+                ALLOCATOR.free(page_phys, PageSize::Size4K);
                 return Err(());
             }
         };
@@ -388,7 +388,7 @@ impl PagedBackingStore for FileVmo {
             let mut pages = self.anonymous_vmo.pages.lock();
             if let Some(&existing_pfn) = pages.get(&offset) {
                 if existing_pfn != 0 {
-                    ALLOCATOR.free(page_phys, BlockSize::Normal);
+                    ALLOCATOR.free(page_phys, PageSize::Size4K);
                     return Ok(existing_pfn);
                 }
             }

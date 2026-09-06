@@ -1,5 +1,5 @@
 use crate::memory::{
-    BlockSize,
+    PageSize,
     GLOBAL_PMM,
 };
 
@@ -22,11 +22,11 @@ impl Magazine {
         } else {
             let mut pmm = GLOBAL_PMM.lock();
             for _ in 0..(MAG_CAPACITY / 2 - 1) {
-                let block = pmm.alloc(BlockSize::Normal);
+                let block = pmm.alloc(PageSize::Size4K);
                 self.pages[self.count] = block.expect("Global PMM exhausted");
                 self.count += 1;
             }
-            let ret = pmm.alloc(BlockSize::Normal).expect("Global PMM exhausted");
+            let ret = pmm.alloc(PageSize::Size4K).expect("Global PMM exhausted");
             drop(pmm);
             ret
         }
@@ -40,7 +40,7 @@ impl Magazine {
             let mut pmm = GLOBAL_PMM.lock();
             for _ in 0..(MAG_CAPACITY / 2) {
                 self.count -= 1;
-                pmm.free(self.pages[self.count], BlockSize::Normal);
+                pmm.free(self.pages[self.count], PageSize::Size4K);
             }
             self.pages[self.count] = addr;
             self.count += 1;
