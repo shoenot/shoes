@@ -81,7 +81,7 @@ impl Pager {
         Self { pml4_phys }
     }
 
-    pub fn pml4_phys(&self) -> PhysAddr {
+    pub fn root_phys(&self) -> PhysAddr {
         self.pml4_phys
     }
 
@@ -179,6 +179,65 @@ impl Pager {
         Ok(())
     }
 
+    pub fn demote_page_no_flush(&mut self, virt: VirtAddr, from_size: PageSize, alloc: &mut impl FrameAllocator) -> Result<(), PagerError> {
+        if from_size == PageSize::Size4K { return Ok(()); }
+        
+        let indices = [virt.p4_index(), virt.p3_index(), virt.p2_index(), virt.p1_index()];
+        let depth = match from_size {
+            PageSize::Size1G => 1,
+            PageSize::Size2M => 2,
+            PageSize::Size4K => unreachable!(),
+        };
+        
+        let mut table = unsafe { PageTable::from_phys(self.pml4_phys) };
+        
+        for i in 0..depth {
+            let idx = indices[i];
+            let entry = &mut table.entries[idx];
+        
+            if !entry.is_present() {
+                return Ok(());
+            }
+        
+            if i == depth - 1 {
+                if !entry.is_huge() {
+                    return Ok(());
+                }
+        
+                let phys_frame = entry.get_frame();
+                let flags = entry.flags();
+        
+                let new_pt_frame = alloc.allocate_frame().ok_or(PagerError::OutOfMemory)?;
+                let new_pt = unsafe { PageTable::from_phys(PhysAddr(new_pt_frame)) };
+                new_pt.zero();
+        
+                let sub_page_size = if from_size == PageSize::Size1G { 0x20_0000 } else { 0x1000 };
+                let child_flags = flags.remove(PageFlags::HUGE_PAGE);
+        
+                for j in 0..512 {
+                    let child_phys = PhysAddr(phys_frame.0 + (j * sub_page_size));
+                    let mut final_child_flags = child_flags;
+                    if from_size == PageSize::Size1G {
+                        final_child_flags = final_child_flags.insert(PageFlags::HUGE_PAGE);
+                    }
+                    new_pt.entries[j].set(child_phys, final_child_flags);
+                }
+        
+                let table_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE;
+                entry.set(PhysAddr(new_pt_frame), table_flags);
+                return Ok(());
+            }
+        
+            if entry.is_huge() {
+                return Err(PagerError::HugePageClash);
+            }
+        
+            table = unsafe { PageTable::from_phys(entry.get_frame()) };
+        }
+        
+        Ok(())
+    }
+
     pub fn change_flags_no_flush(&mut self, virt: VirtAddr, flags: PageFlags, size: PageSize) -> Result<(), PagerError> {
         let indices = [virt.p4_index(), virt.p3_index(), virt.p2_index(), virt.p1_index()];
         let depth = match size {
@@ -215,6 +274,39 @@ impl Pager {
         let phys = leaf_entry.get_frame();
         leaf_entry.set(phys, final_flags);
         Ok(())
+    }
+
+    pub fn free_user_page_tables(&mut self, alloc: &mut impl FrameAllocator) {
+        let pml4 = unsafe { PageTable::from_phys(self.pml4_phys) };
+        for i in 0..256 {
+            let entry = &mut pml4.entries[i];
+            if entry.is_present() && !entry.is_huge() {
+                let pdpt_phys = entry.get_frame();
+                self.free_table_recursive(pdpt_phys, 1, alloc);
+                entry.clear();
+                alloc.deallocate_frame(pdpt_phys.0);
+            }
+        }
+    }
+
+    pub fn free_table_recursive(&self, table_phys: PhysAddr, level: usize, alloc: &mut impl FrameAllocator) {
+        if level == 3 {
+            // vmo handles l3 data frames
+            return;
+        }
+
+        let table = unsafe { PageTable::from_phys(table_phys) };
+        for i in 0..512 {
+            let entry = &mut table.entries[i];
+            // huge means children are data, not tables, so don't descend 
+            if entry.is_present() && !entry.is_huge() {
+                let child_phys = entry.get_frame();
+                self.free_table_recursive(child_phys, level + 1, alloc);
+                entry.clear();
+                alloc.deallocate_frame(child_phys.0);
+            }
+        }
+
     }
 
     pub fn change_flags(&mut self, virt: VirtAddr, flags: PageFlags, size: PageSize) -> Result<(), PagerError> {

@@ -22,7 +22,7 @@ use hal::interrupts::{
     enable_interrupts,
     interrupts_enabled,
 };
-use hal::mmu::{FrameAllocator, PageFlags, get_cr3, load_cr3};
+use hal::mmu::{FrameAllocator, get_cr3, load_cr3};
 use hal::mmu::pager::{PageTable, Pager};
 use heap::*;
 use pmm::*;
@@ -38,7 +38,7 @@ use crate::process::current_process;
 use crate::{
     klogln,
 };
-pub use hal::mmu::{PhysAddr, VirtAddr, PageSize, DIRECT_MAP_OFFSET, pager::{PagerError}};
+pub use hal::mmu::{PhysAddr, PageSize, DIRECT_MAP_OFFSET};
 
 // wrapper that disables interrupts and reenables them (needed bc the slab code was moved to common
 pub struct KernelAllocatorWrapper(SlabAllocator<KernelPageProvider>);
@@ -105,9 +105,9 @@ pub enum FaultError {
 pub struct PCAllocator {}
 
 impl PCAllocator {
-    pub fn alloc(&self, size: PageSize) -> usize {
+    pub fn alloc(&self, size: PageSize) -> Option<usize> {
         match size {
-            PageSize::Size2M => GLOBAL_PMM.lock().alloc(size).expect("[FATAL] Global PMM Exhausted"),
+            PageSize::Size2M => GLOBAL_PMM.lock().alloc(size),
             PageSize::Size4K => {
                 let int_state = interrupts_enabled();
                 disable_interrupts();
@@ -115,9 +115,9 @@ impl PCAllocator {
                 if int_state {
                     enable_interrupts();
                 }
-                ret
+                Some(ret)
             },
-            PageSize::Size1G => unimplemented!(),
+            PageSize::Size1G => None,
         }
     }
 
@@ -134,7 +134,9 @@ impl PCAllocator {
                     enable_interrupts();
                 }
             },
-            PageSize::Size1G => unimplemented!(),
+            PageSize::Size1G => {
+                klogln!("[WARNING] Ignored attempt to free unsupported 1G page at {:#X}", addr);
+            },
         }
     }
 
@@ -143,7 +145,7 @@ impl PCAllocator {
 
 impl FrameAllocator for PCAllocator {
     fn allocate_frame(&mut self) -> Option<usize> {
-        Some(self.alloc(PageSize::Size4K))
+        self.alloc(PageSize::Size4K)
     }
 
     fn deallocate_frame(&mut self, phys_addr: usize) {
@@ -164,14 +166,14 @@ pub fn init() {
     {
         let boot_cr3 = get_cr3() & 0x000F_FFFF_FFFF_F000;
 
-        let new_pml4 = GLOBAL_PMM.lock().alloc(PageSize::Size4K).expect("Failed to allocate kernel PML4");
+        let new_root = GLOBAL_PMM.lock().alloc(PageSize::Size4K).expect("Failed to allocate kernel root page table");
 
-        unsafe { PageTable::from_phys(PhysAddr(new_pml4)).zero(); }
-        let mut kernel_pager = Pager::new(PhysAddr(new_pml4));
+        unsafe { PageTable::from_phys(PhysAddr(new_root)).zero(); }
+        let mut kernel_pager = Pager::new(PhysAddr(new_root));
 
         kernel_pager.sync_kernel_mappings(PhysAddr(boot_cr3 as usize));
 
-        load_cr3(new_pml4 as u64);
+        load_cr3(new_root as u64);
 
         *PAGER.lock() = kernel_pager;
     }
@@ -206,4 +208,31 @@ pub fn hal_map_mmio(phys: u64, _size: usize) -> Option<usize> {
     }
 
     Some(phys as usize + *DIRECT_MAP_OFFSET)
+}
+
+// RAII wrapper for a single 4k phys page
+#[derive(Debug)]
+pub struct PhysBuffer {
+    phys_addr: usize,
+}
+
+impl PhysBuffer {
+    pub fn new() -> Option<Self> {
+        let phys_addr = ALLOCATOR.alloc(PageSize::Size4K)?;
+        Some(Self { phys_addr })
+    }
+
+    pub fn phys(&self) -> usize {
+        self.phys_addr
+    }
+
+    pub fn virt(&self) -> usize {
+        self.phys_addr + *DIRECT_MAP_OFFSET
+    }
+}
+
+impl Drop for PhysBuffer {
+    fn drop(&mut self) {
+        ALLOCATOR.free(self.phys_addr, PageSize::Size4K);
+    }
 }

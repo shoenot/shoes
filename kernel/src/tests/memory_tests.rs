@@ -11,6 +11,7 @@ use core::ptr::{
     write_volatile,
 };
 
+use crate::memory::vmo::Vmo;
 use crate::memory::{ALLOCATOR, NORMAL_PAGE_SIZE};
 use crate::memory::vmm::*;
 use crate::memory::{
@@ -360,7 +361,14 @@ fn test_vmm2_map_and_find() {
     let size = NORMAL_PAGE_SIZE * 4;
 
     assert_eq!(
-        vmm.map_at(base, size, VmOptions::user_rw(), VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(
+            base, 
+            size, 
+            VmOptions::user_rw(), 
+            VmaBacking::Vmo(Vmo::new(size)), 
+            0, 
+            MapBehavior::RequireVacant
+        ),
         Ok(base),
     );
 
@@ -387,7 +395,7 @@ fn test_vmm2_unmap_middle_splits_vma() {
     let size = page * 4;
 
     assert_eq!(
-        vmm.map_at(base, size, VmOptions::user_rw(), VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base, size, VmOptions::user_rw(), VmaBacking::Vmo(Vmo::new(size)), 0, MapBehavior::RequireVacant),
         Ok(base),
     );
 
@@ -422,11 +430,11 @@ fn test_vmm2_unmap_across_multiple_vmas() {
     let page = NORMAL_PAGE_SIZE;
 
     assert_eq!(
-        vmm.map_at(base, page * 2, VmOptions::user_rw(), VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base, page * 2, VmOptions::user_rw(), VmaBacking::Vmo(Vmo::new(page * 2)), 0, MapBehavior::RequireVacant),
         Ok(base),
     );
     assert_eq!(
-        vmm.map_at(base + page * 2, page * 2, VmOptions::user_ro(), VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base + page * 2, page * 2, VmOptions::user_ro(), VmaBacking::Vmo(Vmo::new(page * 2)), 0, MapBehavior::RequireVacant),
         Ok(base + page * 2),
     );
 
@@ -462,11 +470,11 @@ fn test_vmm2_unmap_rejects_holes_without_mutating() {
     let page = NORMAL_PAGE_SIZE;
 
     assert_eq!(
-        vmm.map_at(base, page, VmOptions::user_rw(), VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base, page, VmOptions::user_rw(), VmaBacking::Vmo(Vmo::new(page)), 0, MapBehavior::RequireVacant),
         Ok(base),
     );
     assert_eq!(
-        vmm.map_at(base + page * 2, page, VmOptions::user_ro(), VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base + page * 2, page, VmOptions::user_ro(), VmaBacking::Vmo(Vmo::new(page * 2)), 0, MapBehavior::RequireVacant),
         Ok(base + page * 2),
     );
 
@@ -502,7 +510,7 @@ fn test_vmm2_protect_middle_splits_vma() {
     let size = page * 4;
 
     assert_eq!(
-        vmm.map_at(base, size, VmOptions::user_rw(), VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base, size, VmOptions::user_rw(), VmaBacking::Vmo(Vmo::new(size)), 0, MapBehavior::RequireVacant),
         Ok(base),
     );
 
@@ -543,11 +551,11 @@ fn test_vmm2_protect_rejects_holes_without_mutating() {
     let page = NORMAL_PAGE_SIZE;
 
     assert_eq!(
-        vmm.map_at(base, page, VmOptions::user_rw(), VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base, page, VmOptions::user_rw(), VmaBacking::Vmo(Vmo::new(page)), 0, MapBehavior::RequireVacant),
         Ok(base),
     );
     assert_eq!(
-        vmm.map_at(base + page * 2, page, VmOptions::user_rx(), VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base + page * 2, page, VmOptions::user_rx(), VmaBacking::Vmo(Vmo::new(page)), 0, MapBehavior::RequireVacant),
         Ok(base + page * 2),
     );
 
@@ -583,7 +591,7 @@ fn test_vmm2_preserves_2m_vma_for_aligned_unmap() {
     let options = VmOptions::user_rw().with_page_size(PageSize::Size2M);
 
     assert_eq!(
-        vmm.map_at(base, huge * 2, options, VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base, huge * 2, options, VmaBacking::Vmo(Vmo::new(huge * 2)), 0, MapBehavior::RequireVacant),
         Ok(base),
     );
 
@@ -616,7 +624,7 @@ fn test_vmm2_precise_2m_demotion_only_demotes_touched_chunk() {
     let options = VmOptions::user_rw().with_page_size(PageSize::Size2M);
 
     assert_eq!(
-        vmm.map_at(base, huge * 2, options, VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base, huge * 2, options, VmaBacking::Vmo(Vmo::new(huge * 2)), 0, MapBehavior::RequireVacant),
         Ok(base),
     );
 
@@ -666,7 +674,7 @@ fn test_vmm2_precise_2m_protect_only_demotes_touched_chunk() {
     let ro = VmOptions::user_ro().permissions;
 
     assert_eq!(
-        vmm.map_at(base, huge * 2, options, VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base, huge * 2, options, VmaBacking::Vmo(Vmo::new(huge * 2)), 0, MapBehavior::RequireVacant),
         Ok(base),
     );
 
@@ -721,7 +729,7 @@ fn test_vmm2_precise_1g_to_4k_unmap_keeps_untouched_2m_chunks() {
     let options = VmOptions::user_rw().with_page_size(PageSize::Size1G);
 
     assert_eq!(
-        vmm.map_at(base, one_gib, options, VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base, one_gib, options, VmaBacking::Vmo(Vmo::new(one_gib)), 0, MapBehavior::RequireVacant),
         Ok(base),
     );
 
@@ -772,7 +780,7 @@ fn test_vmm2_precise_1g_to_4k_protect_keeps_untouched_2m_chunks() {
     let ro = VmOptions::user_ro().permissions;
 
     assert_eq!(
-        vmm.map_at(base, one_gib, options, VmaBacking::Anonymous, 0, MapBehavior::RequireVacant),
+        vmm.map_at(base, one_gib, options, VmaBacking::Vmo(Vmo::new(one_gib)), 0, MapBehavior::RequireVacant),
         Ok(base),
     );
 
@@ -831,7 +839,7 @@ fn test_vmm2_transaction_stress() {
 
     // map 2mb exactly in the center
     assert_eq!(
-        vmm.map_at(base + huge * 2, huge, VmOptions::user_rw(), VmaBacking::Anonymous, 0, MapBehavior::ReplaceContained),
+        vmm.map_at(base + huge * 2, huge, VmOptions::user_rw(), VmaBacking::Vmo(Vmo::new(huge)), 0, MapBehavior::ReplaceContained),
         Ok(base + huge * 2)
     );
 

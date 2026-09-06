@@ -251,7 +251,7 @@ impl SchedulerState {
             };
 
             if should_switch_addr_space {
-                load_cr3((&*next_thread).process.pml4_addr as u64);
+                load_cr3((&*next_thread).process.root_addr as u64);
             }
 
             let base_target = (*next_thread).fs_base;

@@ -99,7 +99,7 @@ pub struct ProcessControlBlock {
     pub handles: RwLock<HandleTable>,
     pub vmm: RwLock<VirtMemManager>,
     pub memory: Arc<VmAccounting>,
-    pub pml4_addr: usize,
+    pub root_addr: usize,
 
     pub threads: RwLock<Vec<*mut Thread>>,
     pub active_threads: AtomicUsize,
@@ -212,7 +212,7 @@ impl ProcessControlBlock {
     pub fn new_unregistered(init_table: HandleTable, name: String, credentials: Credentials) -> Process {
         let vmm = VirtMemManager::new(&ALLOCATOR);
         let memory = vmm.accounting();
-        let pml4_addr = vmm.address_space_root();
+        let root_addr = vmm.address_space_root();
 
         Arc::new(Self {
             proc_id: get_new_pid(),
@@ -222,7 +222,7 @@ impl ProcessControlBlock {
             handles: RwLock::new(init_table),
             vmm: RwLock::new(vmm),
             memory,
-            pml4_addr,
+            root_addr,
 
             threads: RwLock::new(Vec::new()),
             active_threads: AtomicUsize::new(0),

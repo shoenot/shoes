@@ -41,6 +41,7 @@ pub enum PagerOp {
     Unmap { start: usize, end: usize, page_size: PageSize },
     Protect { start: usize, end: usize, page_size: PageSize, permissions: VmPermissions },
     Map { start: usize, end: usize, phys: usize, page_size: PageSize, permissions: VmPermissions },
+    Demote { start: usize, end: usize, from: PageSize },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -78,6 +79,10 @@ impl VmaTransaction {
         if start < end {
             self.pager_ops.push(PagerOp::Map { start, end, phys, page_size, permissions });
         }
+    }
+
+    pub fn push_pager_demote(&mut self, start: usize, end: usize, from: PageSize) {
+        if start < end { self.pager_ops.push(PagerOp::Demote { start, end, from }); }
     }
 
     pub fn add_reserved(&mut self, bytes: usize) -> Result<(), VmError> {

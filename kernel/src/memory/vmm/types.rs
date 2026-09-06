@@ -25,7 +25,6 @@ impl VmPermissions {
 #[derive(Debug, Clone)]
 pub enum VmaBacking {
     Reserved,
-    Anonymous,
     Vmo(Arc<dyn PagedBackingStore>),
 }
 
@@ -33,7 +32,6 @@ impl PartialEq for VmaBacking {
     fn eq(&self, other: &Self) -> bool {
         match self {
             Self::Reserved => matches!(other, VmaBacking::Reserved),
-            Self::Anonymous => matches!(other, VmaBacking::Anonymous),
             Self::Vmo(_) => matches!(other, VmaBacking::Vmo(_)),
         }
     }

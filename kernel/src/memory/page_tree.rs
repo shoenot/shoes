@@ -1,4 +1,4 @@
-use core::{alloc::Layout, sync::atomic::{AtomicU64, Ordering}};
+use core::{alloc::Layout, fmt::Debug, sync::atomic::{AtomicU64, Ordering}};
 
 use alloc::{alloc::alloc_zeroed, boxed::Box};
 use hal::mmu::PageSize;
@@ -28,15 +28,15 @@ impl PageSlot {
         (val & Self::PRESENT_BIT) != 0
     }
 
-    pub fn pack_leaf(pfn: usize, dirty: bool) -> u64 {
-        let mut val = ((pfn as u64) << PAGE_SHIFT) & Self::PFN_MASK;
+    pub fn pack_leaf(phys: usize, dirty: bool) -> u64 {
+        let mut val = (phys as u64) & Self::PFN_MASK;
         val |= Self::PRESENT_BIT;
         if dirty { val |= Self::DIRTY_BIT; }
         val
     }
 
-    pub fn unpack_pfn(val: u64) -> usize {
-        ((val & Self::PFN_MASK) >> PAGE_SHIFT) as usize
+    pub fn unpack_phys(val: u64) -> usize {
+        (val & Self::PFN_MASK) as usize
     }
 
     pub fn pack_internal(ptr: *mut RadixNode) -> u64 { ptr as u64 }
@@ -96,7 +96,7 @@ impl PageTree {
         let leaf_entry = self.get_leaf_entry(offset)?;
         let val = leaf_entry.load(Ordering::Acquire);
         if PageSlot::is_leaf(val) {
-            Some(PageSlot::unpack_pfn(val))
+            Some(PageSlot::unpack_phys(val))
         } else {
             None
         }
@@ -149,7 +149,7 @@ impl PageTree {
         loop {
             let leaf_val = leaf_node.entries[idx].load(Ordering::Acquire);
             if PageSlot::is_leaf(leaf_val) {
-                return PageSlot::unpack_pfn(leaf_val);
+                return PageSlot::unpack_phys(leaf_val);
             }
 
             // alloc actual phys memory chunk
@@ -208,17 +208,33 @@ impl PageTree {
                     self.visit_node(PageSlot::unpack_internal(val), level - 1, offset, callback);
                 } else {
                     if PageSlot::is_leaf(val) {
-                        callback(offset, PageSlot::unpack_pfn(val));
+                        callback(offset, PageSlot::unpack_phys(val));
                     }
                 }
             }
         }
+    }
+
+    pub fn remove_page(&self, offset: usize) -> Option<usize> {
+        if let Some(entry) = self.get_leaf_entry(offset) {
+            let old_val = entry.swap(0, Ordering::Release);
+            if PageSlot::is_leaf(old_val) {
+                return Some(PageSlot::unpack_phys(old_val));
+            }
+        }
+        None
     }
 }
 
 // the pagetree auto drops all of its metadata radixnodes when it goes out of scope
 // but it doesn't drop the actual physical pages, which allows the vmo to decide when and how
 // the physical memory is freed
+
+impl Debug for PageTree {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PageTree").finish()
+    }
+}
 
 impl Drop for PageTree {
     fn drop(&mut self) {

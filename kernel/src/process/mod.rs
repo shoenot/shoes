@@ -26,7 +26,7 @@ pub fn init_kernel_process() {
     KERNEL_PROCESS.get_or_init(|| {
         let mut proc = ProcessControlBlock::new(HandleTable::new(), "Vespertine".into(), Credentials::system());
         if let Some(p) = Arc::get_mut(&mut proc) {
-            p.pml4_addr = get_cr3() as usize & 0x000F_FFFF_FFFF_F000;
+            p.root_addr = get_cr3() as usize & 0x000F_FFFF_FFFF_F000;
         }
         let root = ROOT_DIRECTORY
             .get_or_init(|| {

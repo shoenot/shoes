@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use crate::executor::Executor;
 use crate::executor::async_sleep::sleep_async;
 use crate::sync::RwLock;
-use crate::memory::vmo::FileVmo;
+use crate::memory::vmo::{FileVmo, PagedBackingStore};
 use crate::storage::blockdev::AsyncBlockDevice;
 use crate::storage::fs::ext2::Ext2FileSystem;
 use crate::storage::fs::ext2::obj::{
@@ -32,10 +32,7 @@ async fn ext2_writeback_daemon(fs: Arc<Ext2FileSystem>) {
         }
         for (inode_num, file) in dirty_list {
             if file.file_vmo.flush_to_disk().await.is_ok() {
-                let is_still_dirty = {
-                    let dirty = file.file_vmo.anonymous_vmo.dirty_pages.lock();
-                    dirty.values().any(|&d| d)
-                };
+                let is_still_dirty = file.file_vmo.has_dirty_pages();
                 if !is_still_dirty {
                     fs.dirty_files.lock().remove(&inode_num);
                 }

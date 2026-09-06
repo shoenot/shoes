@@ -101,8 +101,8 @@ pub extern "C" fn kmain() -> ! {
     blk_arc.setup_interrupts().ok();
 
     {
-        let kernel_pml4 = PAGER.lock().pml4_phys().0;
-        KERNEL_PROCESS.vmm.write().refresh_kernel_mappings(kernel_pml4 as usize);
+        let kernel_root_phys = PAGER.lock().root_phys().0;
+        KERNEL_PROCESS.vmm.write().refresh_kernel_mappings(kernel_root_phys as usize);
     }
 
     let blk_dyn: Arc<dyn AsyncBlockDevice> = blk_arc.clone();

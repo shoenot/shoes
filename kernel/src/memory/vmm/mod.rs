@@ -9,7 +9,7 @@ pub use types::*;
 pub use accounting::*;
 
 use crate::{memory::{PAGER, PCAllocator, range_tree::{RangeEntry, RangeMap}, vmm::transaction::{AccountingDelta, VmaTransaction}}, sync::TicketLock};
-use hal::mmu::{DIRECT_MAP_OFFSET, PageFlags, PhysAddr, VirtAddr, pager::{PageTable, Pager}};
+use hal::mmu::{DIRECT_MAP_OFFSET, PageFlags, PhysAddr, VirtAddr, pager::{PageTable, Pager, PagerError}};
 
 pub const USER_NULL_GUARD_END:      usize = 0x0000_0000_0001_0000; // 64 KiB
 pub const USER_IMAGE_BASE:          usize = 0x0000_0000_0040_0000; // normal ELF image area
@@ -66,7 +66,7 @@ impl Vma {
     fn committed_bytes(&self, size: usize) -> usize {
         match self.backing {
             VmaBacking::Reserved => 0,
-            VmaBacking::Anonymous | VmaBacking::Vmo(_) => size,
+            VmaBacking::Vmo(_) => size,
         }
     }
 }
@@ -86,11 +86,11 @@ impl Debug for VirtMemManager {
 
 impl VirtMemManager {
     pub fn new(allocator: &'static PCAllocator) -> Self {
-        let pml4_frame = allocator.alloc(super::PageSize::Size4K);
-        unsafe { PageTable::from_phys(PhysAddr(pml4_frame)).zero(); }
+        let root_frame = allocator.alloc(super::PageSize::Size4K);
+        unsafe { PageTable::from_phys(PhysAddr(root_frame)).zero(); }
 
-        let mut pager = Pager::new(PhysAddr(pml4_frame));
-        let kernel_root = PAGER.lock().pml4_phys();
+        let mut pager = Pager::new(PhysAddr(root_frame));
+        let kernel_root = PAGER.lock().root_phys();
         pager.sync_kernel_mappings(kernel_root);
 
         Self {
@@ -169,13 +169,13 @@ impl VirtMemManager {
                     return Err(VmError::InvalidRange);
                 }
 
-                self.vmas = working;
-                self.apply_accounting_delta(tx.accounting);
-
                 let mut all_txs = Vec::with_capacity(demotion_txs.len() + 1);
                 for dtx in &demotion_txs { all_txs.push(dtx); }
                 all_txs.push(&tx);
-                self.execute_pager_ops(&all_txs);
+                self.execute_pager_ops(&all_txs)?;
+
+                self.vmas = working;
+                self.apply_accounting_delta(tx.accounting);
 
                 Ok(req.start)
             },
@@ -201,13 +201,13 @@ impl VirtMemManager {
             return Err(VmError::InvalidRange);
         }
 
-        self.vmas = working;
-        self.apply_accounting_delta(tx.accounting);
-
         let mut all_txs = Vec::with_capacity(demotion_txs.len() + 1);
         for dtx in &demotion_txs { all_txs.push(dtx); }
         all_txs.push(&tx);
-        self.execute_pager_ops(&all_txs);
+        self.execute_pager_ops(&all_txs)?;
+
+        self.vmas = working;
+        self.apply_accounting_delta(tx.accounting);
 
         Ok(())
     }
@@ -227,13 +227,13 @@ impl VirtMemManager {
             return Err(VmError::InvalidRange);
         }
     
-        self.vmas = working;
-        self.apply_accounting_delta(tx.accounting);
-
         let mut all_txs = Vec::with_capacity(demotion_txs.len() + 1);
         for dtx in &demotion_txs { all_txs.push(dtx); }
         all_txs.push(&tx);
-        self.execute_pager_ops(&all_txs);
+        self.execute_pager_ops(&all_txs)?;
+
+        self.vmas = working;
+        self.apply_accounting_delta(tx.accounting);
     
         Ok(())
     }
@@ -364,10 +364,11 @@ impl VirtMemManager {
         let mut next = self.vmas.clone();
         tx.apply_to_map(&mut next)?;
         if !next.validate() { return Err(VmError::InvalidRange); }
-        self.vmas = next;
 
+        self.execute_pager_ops(&[&tx])?;
+
+        self.vmas = next;
         self.apply_accounting_delta(tx.accounting);
-        self.execute_pager_ops(&[&tx]);
 
         Ok(())
     }
@@ -386,7 +387,7 @@ impl VirtMemManager {
         }
 
         let mut tx = VmaTransaction::new();
-        tx.push_pager_unmap(demote_start, demote_end, segment.vma.page_size);
+        tx.push_pager_demote(demote_start, demote_end, segment.vma.page_size);
         tx.remove(segment.start, segment.end);
 
         if segment.start < demote_start {
@@ -465,12 +466,6 @@ impl VirtMemManager {
             VmaBacking::Vmo(vmo) => {
                 vmo.request_page(backing_offset).map_err(|_| FaultError::OutOfMemory)?
             },
-            VmaBacking::Anonymous => {
-                let pfn = ALLOCATOR.alloc(super::PageSize::Size4K);
-                if pfn == 0 { return Err(FaultError::OutOfMemory); }
-                unsafe { core::ptr::write_bytes((pfn + *DIRECT_MAP_OFFSET) as *mut u8, 0, 4096); }
-                pfn
-            }
         };
 
         let mut alloc_wrapper = PCAllocator {};
@@ -484,26 +479,28 @@ impl VirtMemManager {
         Ok(())
     }
 
-    fn execute_pager_ops(&self, txs: &[&VmaTransaction]) {
+    fn execute_pager_ops(&self, txs: &[&VmaTransaction]) -> Result<(), VmError> {
         let mut ops_exist = false;
         for tx in txs {
             if !tx.pager_ops.is_empty() { ops_exist = true; break; }
         }
-        if !ops_exist { return; }
-
+        if !ops_exist { return Ok(()); }
+    
         let mut pager = self.pager.lock();
         let mut alloc_wrapper = PCAllocator {};
-
+    
         let mut min_start = usize::MAX;
         let mut max_end = 0;
-
+    
         for tx in txs {
             for op in &tx.pager_ops {
                 match op {
                     PagerOp::Unmap { start, end, page_size } => {
                         let mut current = *start;
                         while current < *end {
-                            let _ = pager.unmap_page_no_flush(VirtAddr(current), *page_size, &mut alloc_wrapper);
+                            if let Err(e) = pager.unmap_page_no_flush(VirtAddr(current), *page_size, &mut alloc_wrapper) {
+                                if e != hal::mmu::pager::PagerError::NotMapped { return Err(VmError::MappingFailed); }
+                            }
                             current += page_size.bytes();
                         }
                         min_start = min_start.min(*start);
@@ -514,19 +511,34 @@ impl VirtMemManager {
                         let mut hw_flags = permissions.to_hardware_flags();
                         hw_flags = hw_flags.insert(PageFlags::PRESENT);
                         while current < *end {
-                            let _ = pager.change_flags_no_flush(VirtAddr(current), hw_flags, *page_size);
+                            if let Err(e) = pager.change_flags_no_flush(VirtAddr(current), hw_flags, *page_size) {
+                                if e != hal::mmu::pager::PagerError::NotMapped { return Err(VmError::MappingFailed); }
+                            }
                             current += page_size.bytes();
                         }
                         min_start = min_start.min(*start);
                         max_end = max_end.max(*end);
                     },
+                    PagerOp::Demote { start, end, from } => {
+                        let mut current = *start;
+                        while current < *end {
+                            if let Err(e) = pager.demote_page_no_flush(VirtAddr(current), *from, &mut alloc_wrapper) {
+                                if e != hal::mmu::pager::PagerError::NotMapped { return Err(VmError::MappingFailed); }
+                            }
+                            current += from.bytes();
+                        }
+                        min_start = min_start.min(*start);
+                        max_end = max_end.max(*end);
+                    }
                     PagerOp::Map { start, end, phys, page_size, permissions } => {
                         let mut current_virt = *start;
                         let mut current_phys = *phys;
                         let mut hw_flags = permissions.to_hardware_flags();
                         hw_flags = hw_flags.insert(PageFlags::PRESENT);
                         while current_virt < *end {
-                            let _ = pager.map_page(VirtAddr(current_virt), hal::mmu::PhysAddr(current_phys), hw_flags, *page_size, &mut alloc_wrapper);
+                            if let Err(e) = pager.map_page(VirtAddr(current_virt), hal::mmu::PhysAddr(current_phys), hw_flags, *page_size, &mut alloc_wrapper) {
+                                if e != hal::mmu::pager::PagerError::AlreadyMapped { return Err(VmError::MappingFailed); }
+                            }
                             current_virt += page_size.bytes();
                             current_phys += page_size.bytes();
                         }
@@ -536,10 +548,12 @@ impl VirtMemManager {
                 }
             }
         }
-
+    
         if max_end > min_start {
             shootdown(min_start, max_end - min_start);
         }
+    
+        Ok(())
     }
 
     fn apply_accounting_delta(&self, accounting: AccountingDelta) {
@@ -549,11 +563,23 @@ impl VirtMemManager {
         self.accounting.sub_committed(accounting.committed_sub);
     }
 
-    pub fn address_space_root(&self) -> usize { self.pager.lock().pml4_phys().0 }
+    pub fn address_space_root(&self) -> usize { self.pager.lock().root_phys().0 }
 
     pub fn refresh_kernel_mappings(&self, kernel_root: usize) { self.pager.lock().sync_kernel_mappings(PhysAddr(kernel_root)); }
 
     pub fn validate(&self) -> bool { self.vmas.validate() }
+}
+
+impl Drop for VirtMemManager {
+    fn drop(&mut self) {
+        let mut pager = self.pager.lock();
+        let mut alloc_wrapper = PCAllocator {};
+
+        pager.free_user_page_tables(&mut alloc_wrapper);
+
+        let root_phys = pager.root_phys().0;
+        ALLOCATOR.free(root_phys, PageSize::Size4K);
+    }
 }
 
 fn collect_overlapping_vmas_from(map: &RangeMap<Vma>, start: usize, end: usize) -> Vec<VmaSegment> {
