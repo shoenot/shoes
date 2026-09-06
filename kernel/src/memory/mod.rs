@@ -2,11 +2,9 @@ mod bootalloc;
 pub mod heap;
 mod init_pmm;
 pub mod magazine;
-pub mod paging;
 mod pmm;
 pub mod range_tree;
 pub mod vmm;
-pub mod vmm2;
 pub mod vmo;
 pub mod shootdown;
 
@@ -23,9 +21,9 @@ use hal::interrupts::{
     enable_interrupts,
     interrupts_enabled,
 };
-use hal::mmu::FrameAllocator;
+use hal::mmu::{FrameAllocator, PageFlags, get_cr3, load_cr3};
+use hal::mmu::pager::{PageTable, Pager};
 use heap::*;
-use paging::*;
 use pmm::*;
 pub use pmm::{
     BlockSize,
@@ -33,7 +31,6 @@ pub use pmm::{
     NORMAL_PAGE_SIZE,
 };
 use vespertine_common::slab::SlabAllocator;
-use vmm::*;
 
 use crate::cpu::current_core_mut;
 use crate::sync::TicketLock;
@@ -87,7 +84,7 @@ pub static KERNEL_ALLOCATOR: KernelAllocatorWrapper = KernelAllocatorWrapper(Sla
 
 pub static GLOBAL_PMM: TicketLock<Allocator> = TicketLock::new(Allocator::new());
 pub static ALLOCATOR: PCAllocator = PCAllocator {};
-pub static PAGER: TicketLock<Pager> = TicketLock::new(Pager::new(&ALLOCATOR));
+pub static PAGER: TicketLock<Pager> = TicketLock::new(Pager::new(PhysAddr(0)));
 
 pub fn handle_page_fault(addr: usize, error_code: usize) -> Result<(), FaultError> {
     if let Some(proc) = current_process() {
@@ -95,6 +92,13 @@ pub fn handle_page_fault(addr: usize, error_code: usize) -> Result<(), FaultErro
     } else {
         Err(FaultError::InvalidAddress)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultError {
+    InvalidAddress,
+    AccessDenied,
+    OutOfMemory,
 }
 
 #[derive(Debug)]
@@ -158,8 +162,18 @@ pub fn init() {
     klogln!("[SUCCESS] Physical memory manager operational.");
     // Inititate Pager
     {
-        let mut pager = PAGER.lock();
-        pager.init();
+        let boot_cr3 = get_cr3() & 0x000F_FFFF_FFFF_F000;
+
+        let new_pml4 = GLOBAL_PMM.lock().alloc(BlockSize::Normal).expect("Failed to allocate kernel PML4");
+
+        unsafe { PageTable::from_phys(PhysAddr(new_pml4)).zero(); }
+        let mut kernel_pager = Pager::new(PhysAddr(new_pml4));
+
+        kernel_pager.sync_kernel_mappings(PhysAddr(boot_cr3 as usize));
+
+        load_cr3(new_pml4 as u64);
+
+        *PAGER.lock() = kernel_pager;
     }
     klogln!("[SUCCESS] Switched CR3. Paging handover complete.");
 }
@@ -174,6 +188,22 @@ pub fn calculate_order(bytes: usize) -> usize {
 
 pub fn hal_map_mmio(phys: u64, _size: usize) -> Option<usize> {
     let page = phys & !0xFFF;
-    PAGER.lock().map_mmio_addr(page)?;
+    let flags = hal::mmu::PageFlags::PRESENT | hal::mmu::PageFlags::WRITABLE | hal::mmu::PageFlags::NO_EXECUTE | hal::mmu::PageFlags::NO_CACHE | hal::mmu::PageFlags::WRITE_THROUGH;
+    let mut alloc_wrapper = PCAllocator {};
+
+    let result = PAGER.lock().map_page(
+        hal::mmu::VirtAddr(page as usize + *DIRECT_MAP_OFFSET),
+        hal::mmu::PhysAddr(page as usize),
+        flags,
+        hal::mmu::PageSize::Size4K,
+        &mut alloc_wrapper
+    );
+
+    if let Err(e) = result {
+        if e != hal::mmu::pager::PagerError::AlreadyMapped {
+            return None;
+        }
+    }
+
     Some(phys as usize + *DIRECT_MAP_OFFSET)
 }

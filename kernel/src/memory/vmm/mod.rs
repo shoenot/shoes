@@ -1,12 +1,15 @@
 mod types;
 mod accounting;
 mod transaction;
+use core::fmt::Debug;
+
 use alloc::{sync::Arc, vec::Vec};
-use crate::memory::PageSize;
+use crate::memory::{ALLOCATOR, FaultError, PageSize, shootdown::shootdown, vmm::transaction::PagerOp};
 pub use types::*;
 pub use accounting::*;
 
-use crate::{memory::{PAGER, PCAllocator, paging::Pager, range_tree::{RangeEntry, RangeMap}, vmm2::transaction::{AccountingDelta, VmaTransaction}}, sync::TicketLock};
+use crate::{memory::{PAGER, PCAllocator, range_tree::{RangeEntry, RangeMap}, vmm::transaction::{AccountingDelta, VmaTransaction}}, sync::TicketLock};
+use hal::mmu::{DIRECT_MAP_OFFSET, PageFlags, PhysAddr, VirtAddr, pager::{PageTable, Pager}};
 
 pub const USER_NULL_GUARD_END:      usize = 0x0000_0000_0001_0000; // 64 KiB
 pub const USER_IMAGE_BASE:          usize = 0x0000_0000_0040_0000; // normal ELF image area
@@ -75,12 +78,20 @@ pub struct VirtMemManager {
     accounting:         Arc<VmAccounting>,
 }
 
+impl Debug for VirtMemManager {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VirtMemManager").finish()
+    }
+}
+
 impl VirtMemManager {
     pub fn new(allocator: &'static PCAllocator) -> Self {
-        let mut pager = Pager::new(allocator);
-        let kernel_addr_root = PAGER.lock().get_l4_addr();
-        pager.init_process_pager_from_kernel(kernel_addr_root)
-            .expect("Failed to initialize process pager");
+        let pml4_frame = allocator.alloc(super::BlockSize::Normal);
+        unsafe { PageTable::from_phys(PhysAddr(pml4_frame)).zero(); }
+
+        let mut pager = Pager::new(PhysAddr(pml4_frame));
+        let kernel_root = PAGER.lock().pml4_phys();
+        pager.sync_kernel_mappings(kernel_root);
 
         Self {
             vmas: RangeMap::new(),
@@ -150,7 +161,7 @@ impl VirtMemManager {
                 let required = required_granularity_for_range(req.start, req.end);
 
                 let mut working = self.vmas.clone();
-                let _demotion_txs = self.plan_demotions(&mut working, req.start, req.end, required)?;
+                let demotion_txs = self.plan_demotions(&mut working, req.start, req.end, required)?;
                 let tx = self.build_replace_contained_transaction(req.start, req.end, new_vma, &working)?;
                 tx.apply_to_map(&mut working)?;
 
@@ -160,6 +171,11 @@ impl VirtMemManager {
 
                 self.vmas = working;
                 self.apply_accounting_delta(tx.accounting);
+
+                let mut all_txs = Vec::with_capacity(demotion_txs.len() + 1);
+                for dtx in &demotion_txs { all_txs.push(dtx); }
+                all_txs.push(&tx);
+                self.execute_pager_ops(&all_txs);
 
                 Ok(req.start)
             },
@@ -175,7 +191,7 @@ impl VirtMemManager {
         // ensure integrity and commit to live
 
         let mut working = self.vmas.clone();
-        let _demotion_txs = self.plan_demotions(&mut working, range.start, range.end, required)?;
+        let demotion_txs = self.plan_demotions(&mut working, range.start, range.end, required)?;
         let segments = collect_overlapping_vmas_from(&working, range.start, range.end);
         require_full_coverage(range.start, range.end, &segments)?;
         let tx = self.build_unmap_transaction(range.start, range.end, &segments)?;
@@ -188,6 +204,11 @@ impl VirtMemManager {
         self.vmas = working;
         self.apply_accounting_delta(tx.accounting);
 
+        let mut all_txs = Vec::with_capacity(demotion_txs.len() + 1);
+        for dtx in &demotion_txs { all_txs.push(dtx); }
+        all_txs.push(&tx);
+        self.execute_pager_ops(&all_txs);
+
         Ok(())
     }
 
@@ -196,7 +217,7 @@ impl VirtMemManager {
         let required = required_granularity_for_range(range.start, range.end);
     
         let mut working = self.vmas.clone();
-        let _demotion_txs = self.plan_demotions(&mut working, range.start, range.end, required)?;
+        let demotion_txs = self.plan_demotions(&mut working, range.start, range.end, required)?;
         let segments = collect_overlapping_vmas_from(&working, range.start, range.end);
         require_full_coverage(range.start, range.end, &segments)?;
         let tx = self.build_protect_transaction(range.start, range.end, permissions, &segments)?;
@@ -208,6 +229,11 @@ impl VirtMemManager {
     
         self.vmas = working;
         self.apply_accounting_delta(tx.accounting);
+
+        let mut all_txs = Vec::with_capacity(demotion_txs.len() + 1);
+        for dtx in &demotion_txs { all_txs.push(dtx); }
+        all_txs.push(&tx);
+        self.execute_pager_ops(&all_txs);
     
         Ok(())
     }
@@ -228,6 +254,7 @@ impl VirtMemManager {
         let new_committed = replacement.committed_bytes(replaced_size);
         
         let mut tx = VmaTransaction::new();
+        tx.push_pager_unmap(start, end, old.page_size);
         tx.remove(old_start, old_end);
         
         if old_start < start {
@@ -339,11 +366,8 @@ impl VirtMemManager {
         if !next.validate() { return Err(VmError::InvalidRange); }
         self.vmas = next;
 
-        // apply accounting deltas 
-        self.accounting.add_reserved(tx.accounting.reserved_add);
-        self.accounting.sub_reserved(tx.accounting.reserved_sub);
-        self.accounting.add_committed(tx.accounting.committed_add);
-        self.accounting.sub_committed(tx.accounting.committed_sub);
+        self.apply_accounting_delta(tx.accounting);
+        self.execute_pager_ops(&[&tx]);
 
         Ok(())
     }
@@ -362,6 +386,7 @@ impl VirtMemManager {
         }
 
         let mut tx = VmaTransaction::new();
+        tx.push_pager_unmap(demote_start, demote_end, segment.vma.page_size);
         tx.remove(segment.start, segment.end);
 
         if segment.start < demote_start {
@@ -409,6 +434,114 @@ impl VirtMemManager {
         }
     }
 
+    pub fn handle_page_fault(&self, addr: usize, error_code: usize) -> Result<(), FaultError> {
+        let _is_present = (error_code & 0x1) != 0;
+        let is_write = (error_code & 0x2) != 0;
+        let is_user = (error_code & 0x4) != 0;
+        let is_instruction_fetch = (error_code & 0x10) != 0;
+
+        let vma_entry = self.find_vma(addr).map_err(|_| FaultError::InvalidAddress)?;
+        let vma = &vma_entry.value;
+
+        if is_write && !vma.permissions.contains(VmPermissions::WRITE) {
+            return Err(FaultError::AccessDenied);
+        }
+        if is_instruction_fetch && !vma.permissions.contains(VmPermissions::EXECUTE) {
+            return Err(FaultError::AccessDenied);
+        }
+        if is_user && !vma.permissions.contains(VmPermissions::USER) {
+            return Err(FaultError::AccessDenied);
+        }
+        if vma.permissions.contains(VmPermissions::GUARD) {
+            return Err(FaultError::AccessDenied);
+        }
+
+        let page_aligned_addr = addr & !0xFFF;
+        let offset_in_vma = page_aligned_addr - vma_entry.start;
+        let backing_offset = vma.backing_offset + offset_in_vma;
+
+        let phys_addr = match &vma.backing {
+            VmaBacking::Reserved => return Err(FaultError::AccessDenied),
+            VmaBacking::Vmo(vmo) => {
+                vmo.request_page(backing_offset).map_err(|_| FaultError::OutOfMemory)?
+            },
+            VmaBacking::Anonymous => {
+                let pfn = ALLOCATOR.alloc(super::BlockSize::Normal);
+                if pfn == 0 { return Err(FaultError::OutOfMemory); }
+                unsafe { core::ptr::write_bytes((pfn + *DIRECT_MAP_OFFSET) as *mut u8, 0, 4096); }
+                pfn
+            }
+        };
+
+        let mut alloc_wrapper = PCAllocator {};
+        let mut pager = self.pager.lock();
+        let mut hw_flags = vma.permissions.to_hardware_flags();
+        hw_flags = hw_flags.insert(PageFlags::PRESENT);
+
+        pager.map_page(VirtAddr(page_aligned_addr), PhysAddr(phys_addr), hw_flags, PageSize::Size4K, &mut alloc_wrapper)
+            .map_err(|_| FaultError::OutOfMemory)?;
+
+        Ok(())
+    }
+
+    fn execute_pager_ops(&self, txs: &[&VmaTransaction]) {
+        let mut ops_exist = false;
+        for tx in txs {
+            if !tx.pager_ops.is_empty() { ops_exist = true; break; }
+        }
+        if !ops_exist { return; }
+
+        let mut pager = self.pager.lock();
+        let mut alloc_wrapper = PCAllocator {};
+
+        let mut min_start = usize::MAX;
+        let mut max_end = 0;
+
+        for tx in txs {
+            for op in &tx.pager_ops {
+                match op {
+                    PagerOp::Unmap { start, end, page_size } => {
+                        let mut current = *start;
+                        while current < *end {
+                            let _ = pager.unmap_page_no_flush(VirtAddr(current), *page_size, &mut alloc_wrapper);
+                            current += page_size.bytes();
+                        }
+                        min_start = min_start.min(*start);
+                        max_end = max_end.max(*end);
+                    },
+                    PagerOp::Protect { start, end, page_size, permissions } => {
+                        let mut current = *start;
+                        let mut hw_flags = permissions.to_hardware_flags();
+                        hw_flags = hw_flags.insert(PageFlags::PRESENT);
+                        while current < *end {
+                            let _ = pager.change_flags_no_flush(VirtAddr(current), hw_flags, *page_size);
+                            current += page_size.bytes();
+                        }
+                        min_start = min_start.min(*start);
+                        max_end = max_end.max(*end);
+                    },
+                    PagerOp::Map { start, end, phys, page_size, permissions } => {
+                        let mut current_virt = *start;
+                        let mut current_phys = *phys;
+                        let mut hw_flags = permissions.to_hardware_flags();
+                        hw_flags = hw_flags.insert(PageFlags::PRESENT);
+                        while current_virt < *end {
+                            let _ = pager.map_page(VirtAddr(current_virt), hal::mmu::PhysAddr(current_phys), hw_flags, *page_size, &mut alloc_wrapper);
+                            current_virt += page_size.bytes();
+                            current_phys += page_size.bytes();
+                        }
+                        min_start = min_start.min(*start);
+                        max_end = max_end.max(*end);
+                    }
+                }
+            }
+        }
+
+        if max_end > min_start {
+            shootdown(min_start, max_end - min_start);
+        }
+    }
+
     fn apply_accounting_delta(&self, accounting: AccountingDelta) {
         self.accounting.add_reserved(accounting.reserved_add);
         self.accounting.sub_reserved(accounting.reserved_sub);
@@ -416,10 +549,9 @@ impl VirtMemManager {
         self.accounting.sub_committed(accounting.committed_sub);
     }
 
-    pub fn address_space_root(&self) -> usize { self.pager.lock().get_l4_addr() as usize }
+    pub fn address_space_root(&self) -> usize { self.pager.lock().pml4_phys().0 }
 
-    pub fn refresh_kernel_mappings(&self, kernel_root: usize) { self.pager.lock().refresh_kernel_half_from(kernel_root as u64); }
-
+    pub fn refresh_kernel_mappings(&self, kernel_root: usize) { self.pager.lock().sync_kernel_mappings(PhysAddr(kernel_root)); }
 
     pub fn validate(&self) -> bool { self.vmas.validate() }
 }

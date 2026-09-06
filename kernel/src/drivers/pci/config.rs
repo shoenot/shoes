@@ -5,6 +5,8 @@ use hal::io::{
     outl,
 };
 
+use crate::memory::hal_map_mmio;
+
 pub fn pci_build_addr(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
     (bus as u32) << 16 | (slot as u32) << 11 | (func as u32) << 8 | (offset & 0xFC) as u32 | 0x8000_0000
 }
@@ -113,7 +115,7 @@ pub fn pci_setup_msix_entry(bus: u8, slot: u8, func: u8, vector: u8, target_core
 
     // map the msi-x table if not already mapped
     for p in (table_phys / page_size)..=((table_phys + total_bytes - 1) / page_size) {
-        PAGER.lock().map_mmio_addr(p * page_size);
+        hal_map_mmio(p * page_size, 4096);
     }
 
     let table_virt = table_phys + *DIRECT_MAP_OFFSET as u64;

@@ -9,8 +9,7 @@ use crate::drivers::pci::{
     pci_get_dev,
 };
 use crate::memory::{
-    DIRECT_MAP_OFFSET,
-    PAGER,
+    DIRECT_MAP_OFFSET, PAGER, hal_map_mmio,
 };
 
 #[derive(Debug)]
@@ -87,11 +86,9 @@ pub fn init_virtio() -> Option<VirtioBlockDriver> {
         let end_phys = cap_end.div_ceil(4096) * 4096;
 
         {
-            let mut pager = PAGER.lock();
-
             let mut page_phys = start_phys;
             while page_phys < end_phys {
-                pager.map_mmio_addr(page_phys).unwrap();
+                hal_map_mmio(page_phys, 4096).unwrap();
                 page_phys += 4096;
             }
         }

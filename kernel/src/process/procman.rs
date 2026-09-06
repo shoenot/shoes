@@ -53,8 +53,7 @@ use crate::sched::dispatch::{
 use crate::process::current_process;
 use crate::sched::priority::ThreadPriority;
 use crate::memory::vmm::{
-    VM_FLAG_USER,
-    VM_FLAG_WRITE,
+    VmOptions, VmaBacking,
 };
 use crate::memory::vmo::Vmo;
 
@@ -214,8 +213,8 @@ impl KernelObject for ProcessManager {
                 let stack_addr = new_proc
                     .vmm
                     .write()
-                    .mmap_vmo(stack_size, VM_FLAG_USER | VM_FLAG_WRITE, stack_vmo.clone())
-                    .ok_or(InvocationError::OutOfMemory)?;
+                    .reserve(stack_size, VmOptions::user_rw(), VmaBacking::Vmo(stack_vmo.clone()))
+                    .map_err(|_| InvocationError::OutOfMemory)?;
 
                 let initpkg = ProcessInitPackage {
                     root_handle: HandleID(0),

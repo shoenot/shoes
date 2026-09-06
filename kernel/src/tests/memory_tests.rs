@@ -12,7 +12,7 @@ use core::ptr::{
 };
 
 use crate::memory::{ALLOCATOR, NORMAL_PAGE_SIZE};
-use crate::memory::vmm2::*;
+use crate::memory::vmm::*;
 use crate::memory::{
     BlockSize,
     GLOBAL_PMM,

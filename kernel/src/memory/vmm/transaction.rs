@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 use super::{Vma, VmError, super::PageSize};
-use crate::memory::{range_tree::RangeMap, vmm2::VmPermissions};
+use crate::memory::{range_tree::RangeMap, vmm::VmPermissions};
 
 #[derive(Debug, Clone)]
 pub struct VmaInsert {

@@ -9,6 +9,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use hal::mmu::PageSize;
 use core::mem::MaybeUninit;
 use core::ptr::{
     copy_nonoverlapping,
@@ -35,10 +36,7 @@ use crate::object::vfs::kernel_walk;
 use crate::process::current_process;
 use crate::klogln;
 use crate::memory::vmm::{
-    VM_FLAG_EXEC,
-    VM_FLAG_USER,
-    VM_FLAG_WRITE,
-    align_up,
+    CachePolicy, MapBehavior, VmOptions, VmPermissions, VmaBacking, VmaChargeKind, 
 };
 use crate::memory::vmo::{
     PagedBackingStore,
@@ -152,14 +150,17 @@ async fn map_elf_segments(
             let aligned_vaddr = (load_base + ph.p_vaddr as usize) & !0xFFF;
             let aligned_offset = (ph.p_offset & !0xFFF) as usize;
             let offset_in_page = (load_base + ph.p_vaddr as usize) & 0xFFF;
-            let total_map_size = align_up(offset_in_page + ph.p_memsz as usize);
+            let total_map_size = (offset_in_page + ph.p_memsz as usize + 4095) & !4095;
 
-            let mut vm_flags = VM_FLAG_USER;
-            if (ph.p_flags & PF_W) != 0 {
-                vm_flags |= VM_FLAG_WRITE
-            };
-            if (ph.p_flags & PF_X) != 0 {
-                vm_flags |= VM_FLAG_EXEC
+            let mut perms = VmPermissions::USER;
+            if (ph.p_flags & PF_W) != 0 { perms = perms | VmPermissions::WRITE; }
+            if (ph.p_flags & PF_X) != 0 { perms = perms | VmPermissions::EXECUTE; }
+
+            let options = VmOptions {
+                permissions: perms,
+                cache: CachePolicy::Normal,
+                page_size: PageSize::Size4K,
+                charge: VmaChargeKind::Private,
             };
 
             let (segment_vmo, map_offset) = if ph.p_filesz == 0 {
@@ -212,7 +213,7 @@ async fn map_elf_segments(
                 (file_vmo.clone(), aligned_offset)
             };
 
-            proc.vmm.write().mmap_vmo_at(aligned_vaddr, total_map_size, vm_flags, segment_vmo, map_offset).ok_or_else(|| {
+            proc.vmm.write().map_at(aligned_vaddr, total_map_size, options, VmaBacking::Vmo(segment_vmo), map_offset, MapBehavior::RequireVacant).map_err(|_| {
                 klogln!("[ERROR] load_elf: mmap_vmo_at failed for segment at 0x{:X}", aligned_vaddr);
                 LoaderError::FileReadError
             })?;

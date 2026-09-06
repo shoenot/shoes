@@ -67,8 +67,7 @@ use crate::sched::{
 };
 use super::current_process;
 use crate::memory::vmm::{
-    VirtMemManager,
-    VmAccounting,
+    VirtMemManager, VmAccounting, VmPermissions,
 };
 use crate::memory::{
     ALLOCATOR,
@@ -213,7 +212,7 @@ impl ProcessControlBlock {
     pub fn new_unregistered(init_table: HandleTable, name: String, credentials: Credentials) -> Process {
         let vmm = VirtMemManager::new(&ALLOCATOR);
         let memory = vmm.accounting();
-        let pml4_addr = vmm.get_pml4_addr();
+        let pml4_addr = vmm.address_space_root();
 
         Arc::new(Self {
             proc_id: get_new_pid(),
@@ -250,7 +249,7 @@ impl ProcessControlBlock {
             ProcLifecycle::Terminated(t) => (ProcState::Terminated, t.reason, t.code, t.detail),
         };
 
-        let memory_usage = if self.proc_id == 0 { kernel_heap_allocated() } else { self.memory.resident_bytes() };
+        let memory_usage = if self.proc_id == 0 { kernel_heap_allocated() } else { self.vmm.read().accounting().snapshot().resident_bytes };
 
         let mut info = ProcInfo::zeroed();
 
@@ -386,7 +385,7 @@ impl KernelObject for ProcessControlBlock {
                 self.info(info_ptr as *mut ProcInfo)
             }
             Invocation::Proc(ProcOp::Unmap { vaddr, len }) => {
-                self.vmm.write().munmap(vaddr, len).map(|_| 0).map_err(|_| InvocationError::InvalidArgument)
+                self.vmm.write().unmap_range(vaddr, len).map(|_| 0).map_err(|_| InvocationError::InvalidArgument)
             }
             Invocation::Proc(ProcOp::SpawnThread { entry, stack_top, arg, priority }) => {
                 let tp = ThreadPriority::from(priority);
@@ -422,7 +421,11 @@ impl KernelObject for ProcessControlBlock {
                 Ok(new_handle_id.0)
             }
             Invocation::Proc(ProcOp::Mprotect { vaddr, len, prot }) => {
-                self.vmm.write().mprotect(vaddr, len, prot).map(|_| 0).map_err(|_| InvocationError::InvalidArgument)
+                let mut perms = VmPermissions::USER;
+                if prot & 1 != 0 { perms = perms | VmPermissions::WRITE; }
+                if prot & 2 != 0 { perms = perms | VmPermissions::EXECUTE; }
+
+                self.vmm.write().protect_range(vaddr, len, perms).map(|_| 0).map_err(|_| InvocationError::InvalidArgument)
             }
             _ => Err(InvocationError::UnsupportedOperation),
         }

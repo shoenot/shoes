@@ -129,17 +129,19 @@ impl Pager {
         Ok(())
     }
 
-    pub fn unmap_page(&mut self, virt: VirtAddr, size: PageSize, alloc: &mut impl FrameAllocator) -> Result<(), PagerError> {
+    pub fn unmap_page_no_flush(&mut self, virt: VirtAddr, size: PageSize, alloc: &mut impl FrameAllocator) -> Result<(), PagerError> {
         let indices = [virt.p4_index(), virt.p3_index(), virt.p2_index(), virt.p1_index()];
         let depth = match size {
             PageSize::Size1G => 1,
             PageSize::Size2M => 2,
             PageSize::Size4K => 3,
         };
-        self.unmap_recursive(self.pml4_phys, &indices, 0, depth, alloc)?;
+        self.unmap_recursive(self.pml4_phys, &indices, 0, depth, alloc)
+    }
 
+    pub fn unmap_page(&mut self, virt: VirtAddr, size: PageSize, alloc: &mut impl FrameAllocator) -> Result<(), PagerError> {
+        self.unmap_page_no_flush(virt, size, alloc)?;
         super::flush_tlb(virt.0 as u64);
-
         Ok(())
     }
 
@@ -177,7 +179,7 @@ impl Pager {
         Ok(())
     }
 
-    pub fn change_flags(&mut self, virt: VirtAddr, flags: PageFlags, size: PageSize) -> Result<(), PagerError> {
+    pub fn change_flags_no_flush(&mut self, virt: VirtAddr, flags: PageFlags, size: PageSize) -> Result<(), PagerError> {
         let indices = [virt.p4_index(), virt.p3_index(), virt.p2_index(), virt.p1_index()];
         let depth = match size {
             PageSize::Size1G => 1,
@@ -212,9 +214,12 @@ impl Pager {
     
         let phys = leaf_entry.get_frame();
         leaf_entry.set(phys, final_flags);
-    
+        Ok(())
+    }
+
+    pub fn change_flags(&mut self, virt: VirtAddr, flags: PageFlags, size: PageSize) -> Result<(), PagerError> {
+        self.change_flags_no_flush(virt, flags, size)?;
         super::flush_tlb(virt.0 as u64);
-    
         Ok(())
     }
 

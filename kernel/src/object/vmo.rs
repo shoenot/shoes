@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use hal::mmu::PageSize;
 use core::any::Any;
 
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ use vespertine_abi::{
     Invocation,
 };
 
+use crate::memory::vmm::{CachePolicy, MapBehavior, VmOptions, VmPermissions, VmaBacking, VmaChargeKind};
 use crate::object::invoke::InvocationError;
 use crate::object::obj::KernelObject;
 use crate::process::current_process;
@@ -46,13 +48,25 @@ impl KernelObject for VmoObject {
                 }
                 VmoOp::MapIntoProc { vaddr, len, vm_flags } => {
                     let current_proc = current_process().ok_or(InvocationError::UnsupportedOperation)?;
-
                     let mut vmm = current_proc.vmm.write();
 
+                    let mut perms = VmPermissions::USER;
+                    if vm_flags & 1 != 0 { perms = perms | VmPermissions::WRITE; }
+                    if vm_flags & 2 != 0 { perms = perms | VmPermissions::EXECUTE; }
+
+                    let opts = VmOptions {
+                        permissions: perms,
+                        cache: CachePolicy::Normal,
+                        page_size: PageSize::Size4K,
+                        charge: VmaChargeKind::Private,
+                    };
+
+                    let backing = VmaBacking::Vmo(self.vmo.clone());
+
                     let mapped_addr = if vaddr == 0 {
-                        vmm.mmap_vmo(len, vm_flags, self.vmo.clone())
+                        vmm.reserve(len, opts, backing).ok()
                     } else {
-                        vmm.mmap_vmo_at(vaddr, len, vm_flags, self.vmo.clone(), 0)
+                        vmm.map_at(vaddr, len, opts, backing, 0, MapBehavior::ReplaceContained).ok()
                     };
 
                     mapped_addr.ok_or(InvocationError::OutOfMemory)
