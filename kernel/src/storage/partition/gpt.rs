@@ -4,10 +4,7 @@ use alloc::vec::Vec;
 use crate::drivers::virtio::blk::BlockTransferFuture;
 use crate::klogln;
 use crate::memory::{
-    ALLOCATOR,
-    PageSize,
-    DIRECT_MAP_OFFSET,
-    calculate_order,
+    ALLOCATOR, DIRECT_MAP_OFFSET, PageSize, PhysBuffer, calculate_order,
 };
 use crate::storage::blockdev::AsyncBlockDevice;
 
@@ -89,21 +86,16 @@ impl GptTable {
     pub async fn parse(raw_device: Arc<dyn AsyncBlockDevice>) -> Result<Self, ()> {
         let mut partitions = Vec::new();
 
-        let header_page_phys = ALLOCATOR.alloc(PageSize::Size4K) as u64;
-        if header_page_phys == 0 {
-            return Err(());
-        }
-        let header_page_virt = header_page_phys + *DIRECT_MAP_OFFSET as u64;
+        let header_buffer = PhysBuffer::new().ok_or(())?;
 
         // fetch lba 1 (primary gpt header block)
-        klogln!("[GPT] reading GPT header lba=1 into phys=0x{:x}", header_page_phys);
-        let header_future = raw_device.read_sectors(1, 1, header_page_phys)?;
+        klogln!("[GPT] reading GPT header lba=1 into phys=0x{:x}", header_buffer.phys());
+        let header_future = raw_device.read_sectors(1, 1, header_buffer.phys() as u64)?;
         header_future.await?;
         klogln!("[GPT] header read complete");
 
-        let header = unsafe { &*(header_page_virt as *const GptHeader) };
+        let header = unsafe { &*(header_buffer.virt() as *const GptHeader) };
         if header.signature != 0x5452415020494645 {
-            ALLOCATOR.free(header_page_phys as usize, PageSize::Size4K);
             return Err(());
         }
 
@@ -115,7 +107,6 @@ impl GptTable {
         let table_sectors = (total_table_bytes + 511) / 512; // round up to sector units
 
         if num_entries > 128 || entry_size != 128 {
-            ALLOCATOR.free(header_page_phys as usize, PageSize::Size4K);
             return Err(());
         }
 
@@ -125,7 +116,6 @@ impl GptTable {
         let table_buf_phys = match ALLOCATOR.alloc_order(table_order) {
             Some(a) => a,
             None => {
-                ALLOCATOR.free(header_page_phys as usize, PageSize::Size4K);
                 return Err(());
             }
         } as u64;
@@ -151,7 +141,6 @@ impl GptTable {
             }
         }
 
-        ALLOCATOR.free(header_page_phys as usize, PageSize::Size4K);
         ALLOCATOR.free_order(table_buf_phys as usize, table_order);
         Ok(GptTable { partitions })
     }

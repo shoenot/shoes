@@ -47,9 +47,7 @@ use crate::drivers::virtio::mmio::{
 };
 use crate::interrupts::alloc::MsiHandle;
 use crate::memory::{
-    ALLOCATOR,
-    PageSize,
-    DIRECT_MAP_OFFSET,
+    ALLOCATOR, DIRECT_MAP_OFFSET, PageSize, PhysBuffer,
 };
 use crate::storage::blockdev::{
     AsyncBlockDevice,
@@ -567,33 +565,29 @@ impl VirtioBlockDevice {
         let vq_state = &self.queues[vq_idx];
 
         unsafe {
-            let page_phys = crate::memory::ALLOCATOR.alloc(PageSize::Size4K);
-            if page_phys == 0 {
-                return Err(());
-            };
-            let page_virt = page_phys + *DIRECT_MAP_OFFSET;
+            let buffer = PhysBuffer::new().ok_or(())?;
             let dma_len = sectors_count as usize * 512;
             let dma_buffer = if is_write { DmaBuffer::from_phys(buf_phys as usize, dma_len)? } else { DmaBuffer::new(dma_len)? };
 
-            write_bytes(page_virt as *mut u8, 0, 4096);
+            write_bytes(buffer.virt() as *mut u8, 0, 4096);
 
             let req_hdr = VirtioBlkReqHeader { req_type: if is_write { VIRTIO_BLK_T_OUT } else { VIRTIO_BLK_T_IN }, reserved: 0, sector };
-            let hdr_ptr = page_virt as *mut VirtioBlkReqHeader;
+            let hdr_ptr = buffer.virt() as *mut VirtioBlkReqHeader;
             write_volatile(hdr_ptr, req_hdr);
 
-            let status_ptr = (page_virt + 512) as *mut u8;
+            let status_ptr = (buffer.virt() + 512) as *mut u8;
             write_volatile(status_ptr, 0xFF);
 
             let request = {
                 let mut vq = vq_state.vq.lock();
-                let (d0, d1, d2) = alloc_request_descs(&mut vq, page_phys)?;
+                let (d0, d1, d2) = alloc_request_descs(&mut vq, buffer.phys())?;
 
                 // chain desc 0 - header
                 let desc0 = vq.desc.add(d0 as usize);
                 write_volatile(
                     desc0,
                     VqDescriptor {
-                        addr: page_phys as u64,
+                        addr: buffer.phys() as u64,
                         len: 16,
                         flags: 1, // next flag
                         next: d1,
@@ -614,14 +608,14 @@ impl VirtioBlockDevice {
 
                 // chain desc 2 - status byte
                 let desc2 = vq.desc.add(d2 as usize);
-                write_volatile(desc2, VqDescriptor { addr: (page_phys + 512) as u64, len: 1, flags: 2, next: 0xFFFF });
+                write_volatile(desc2, VqDescriptor { addr: (buffer.phys() + 512) as u64, len: 1, flags: 2, next: 0xFFFF });
 
                 let avail_idx_ptr = vq.available.idx;
                 let idx = read_volatile(avail_idx_ptr);
                 let slot = (idx as usize) % (vq.queue_size as usize);
                 let ring_slot_ptr = vq.available.ring.add(slot);
                 write_volatile(ring_slot_ptr, d0);
-                let request = BlockRequest::new(d0, d1, d2, page_phys, dma_buffer.clone());
+                let request = BlockRequest::new(d0, d1, d2, buffer.phys(), dma_buffer.clone());
                 store_request(&vq, &request);
 
                 // if the device supports virtio_ring_f_event_idx, update used_event so the device
@@ -638,6 +632,8 @@ impl VirtioBlockDevice {
 
                 request
             };
+
+            core::mem::forget(buffer);
 
             Ok(BlockTransferFuture {
                 request,

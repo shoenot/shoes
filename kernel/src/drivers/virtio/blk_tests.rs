@@ -75,7 +75,7 @@ fn observer_context(request: Arc<BlockRequest>) -> (Arc<ResultObserver>, core::t
 fn poll_future(future: &mut BlockTransferFuture, context: &mut Context<'_>) -> Poll<Result<(), ()>> { Pin::new(future).poll(context) }
 
 fn alloc_page() -> usize {
-    let page = ALLOCATOR.alloc(PageSize::Size4K);
+    let page = ALLOCATOR.alloc(PageSize::Size4K).unwrap();
     assert_ne!(page, 0, "failed to allocate test page");
     page
 }
@@ -253,7 +253,7 @@ fn test_descriptor_allocation_failure_cleans_up_resources() {
     assert!(alloc_request_descs(&mut vq, page_phys).is_err(), "descriptor allocation unexpectedly succeeded");
     assert_eq!(drain_descs(&mut vq, 2), alloc::vec![0, 1], "descriptor cleanup did not restore the freelist");
 
-    let recycled = ALLOCATOR.alloc(PageSize::Size4K);
+    let recycled = ALLOCATOR.alloc(PageSize::Size4K).unwrap();
     assert_eq!(recycled, page_phys, "request page was not returned to the local allocator");
     ALLOCATOR.free(recycled, PageSize::Size4K);
 }

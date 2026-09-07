@@ -183,12 +183,11 @@ impl Vmo {
     }
 }
 
-// Drops all the physical pages, then the PageTree automatically drops the Radix metadata nodes!
 impl Drop for Vmo {
     fn drop(&mut self) {
         if self.is_physical { return; }
         self.tree.for_each_page(|_offset, pfn| {
-            ALLOCATOR.free(pfn, PageSize::Size4K);
+            ALLOCATOR.drop_page_ref(pfn);
         });
     }
 }
@@ -205,12 +204,8 @@ impl PinnedVmo {
 
 impl Drop for PinnedVmo {
     fn drop(&mut self) {
-        let pmm = GLOBAL_PMM.lock();
         for &addr in &self.phys_addrs {
-            let pfn = addr / NORMAL_PAGE_SIZE;
-            if pfn < pmm.pfndb.len() {
-                pmm.pfndb[pfn].flags.fetch_and(!PF_PINNED, Ordering::SeqCst);
-            }
+            ALLOCATOR.drop_page_ref(addr);
         }
     }
 }
@@ -311,16 +306,9 @@ impl PagedBackingStore for FileVmo {
     }
 
     fn pin(self: Arc<Self>, offset: usize, len: usize) -> Result<PinnedVmo, ()> {
-        let current_size = self.anonymous_vmo.size.load(Ordering::Relaxed);
-        if offset + len > current_size { return Err(()); }
-
-        let start_page = offset / NORMAL_PAGE_SIZE;
-        let end_page = (offset + len).div_ceil(NORMAL_PAGE_SIZE);
         let mut phys_addrs = Vec::new();
-
-        for i in start_page..end_page {
-            let page_offset = i * NORMAL_PAGE_SIZE;
-            let addr = self.request_page(page_offset)?;
+        for page_offset in (0..len).step_by(NORMAL_PAGE_SIZE) {
+            let addr = self.request_page(offset + page_offset)?;
             phys_addrs.push(addr);
         }
 
@@ -328,9 +316,10 @@ impl PagedBackingStore for FileVmo {
         for &addr in &phys_addrs {
             let pfn = addr / NORMAL_PAGE_SIZE;
             if pfn < pmm.pfndb.len() {
-                pmm.pfndb[pfn].flags.fetch_or(PF_PINNED, Ordering::SeqCst);
+                pmm.pfndb[pfn].refcount.fetch_add(1, Ordering::SeqCst);
             }
         }
+
         Ok(PinnedVmo { vmo: self, phys_addrs })
     }
 

@@ -17,7 +17,7 @@ impl PageProvider for KernelPageProvider {
     fn allocate_pages(&self, size: usize) -> *mut u8 {
         // slab page reqs are normalized to 4kb
         if size <= 4096 {
-            let phys = ALLOCATOR.alloc(PageSize::Size4K);
+            let phys = ALLOCATOR.alloc(PageSize::Size4K).expect("Out of memory");
             return (phys + *DIRECT_MAP_OFFSET) as *mut u8;
         } else {
             // large allocations go directly to the buddy
