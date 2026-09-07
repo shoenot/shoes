@@ -26,9 +26,7 @@ use crate::memory::vmo::{
     PagedBackingStore,
 };
 use crate::memory::{
-    ALLOCATOR,
-    PageSize,
-    DIRECT_MAP_OFFSET,
+    ALLOCATOR, DIRECT_MAP_OFFSET, PageSize, PhysBuffer,
 };
 use crate::storage::fs::ext2::Ext2FileSystem;
 use crate::storage::fs::ext2::permissions::file_permissions;
@@ -232,26 +230,19 @@ impl Ext2File {
                 let block_id = self.fs.resolve_file_block(&inode, block_index).await.map_err(|_| InvocationError::UnsupportedOperation)?;
 
                 if block_id != 0 {
-                    let page = ALLOCATOR.alloc(PageSize::Size4K);
-                    if page == 0 {
-                        return Err(InvocationError::OutOfMemory);
-                    }
+                    let page = PhysBuffer::new().ok_or(InvocationError::OutOfMemory)?;
 
-                    if self.fs.read_block(block_id, page as u64).await.is_err() {
-                        ALLOCATOR.free(page, PageSize::Size4K);
+                    if self.fs.read_block(block_id, page.phys() as u64).await.is_err() {
                         return Err(InvocationError::UnsupportedOperation);
                     }
 
                     unsafe {
-                        core::ptr::write_bytes((page + *DIRECT_MAP_OFFSET + block_offset) as *mut u8, 0, block_size - block_offset);
+                        core::ptr::write_bytes((page.virt() + block_offset) as *mut u8, 0, block_size - block_offset);
                     }
 
-                    if self.fs.cache.write_block(block_id as usize, page as u64).await.is_err() {
-                        ALLOCATOR.free(page, PageSize::Size4K);
+                    if self.fs.cache.write_block(block_id as usize, page.phys() as u64).await.is_err() {
                         return Err(InvocationError::UnsupportedOperation);
                     }
-
-                    ALLOCATOR.free(page, PageSize::Size4K);
                 }
             }
 

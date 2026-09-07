@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 use super::{Vma, VmError, super::PageSize};
-use crate::memory::{range_tree::RangeMap, vmm::VmPermissions};
+use crate::memory::{range_tree::RangeMap, vmm::{VmPermissions, VmaChargeKind}};
 
 #[derive(Debug, Clone)]
 pub struct VmaInsert {
@@ -38,7 +38,7 @@ pub struct AccountingDelta {
 
 #[derive(Debug, Clone)]
 pub enum PagerOp {
-    Unmap { start: usize, end: usize, page_size: PageSize },
+    Unmap { start: usize, end: usize, page_size: PageSize, charge: VmaChargeKind },
     Protect { start: usize, end: usize, page_size: PageSize, permissions: VmPermissions },
     Map { start: usize, end: usize, phys: usize, page_size: PageSize, permissions: VmPermissions },
     Demote { start: usize, end: usize, from: PageSize },
@@ -67,8 +67,8 @@ impl VmaTransaction {
         }
     }
 
-    pub fn push_pager_unmap(&mut self, start: usize, end: usize, page_size: PageSize) {
-        if start < end { self.pager_ops.push(PagerOp::Unmap { start, end, page_size }); }
+    pub fn push_pager_unmap(&mut self, start: usize, end: usize, page_size: PageSize, charge: VmaChargeKind) {
+        if start < end { self.pager_ops.push(PagerOp::Unmap { start, end, page_size, charge }); }
     }
 
     pub fn push_pager_protect(&mut self, start: usize, end: usize, page_size: PageSize, permissions: VmPermissions) {

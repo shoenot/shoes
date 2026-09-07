@@ -141,6 +141,15 @@ impl PCAllocator {
     }
 
     pub fn free_order(&self, addr: usize, order: usize) { GLOBAL_PMM.lock().free_order(addr, order) }
+
+    pub fn drop_page_ref(&self, addr: usize) {
+        let pmm = GLOBAL_PMM.lock();
+        let pfn = addr / 4096;
+        if pmm.pfndb[pfn].refcount.fetch_sub(1, Ordering::SeqCst) == 1 {
+            drop(pmm);
+            self.free(addr, PageSize::Size4K);
+        }
+    }
 }
 
 impl FrameAllocator for PCAllocator {

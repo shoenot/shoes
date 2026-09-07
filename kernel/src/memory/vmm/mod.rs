@@ -86,7 +86,7 @@ impl Debug for VirtMemManager {
 
 impl VirtMemManager {
     pub fn new(allocator: &'static PCAllocator) -> Self {
-        let root_frame = allocator.alloc(super::PageSize::Size4K);
+        let root_frame = allocator.alloc(super::PageSize::Size4K).expect("Cannot allocate root frame");
         unsafe { PageTable::from_phys(PhysAddr(root_frame)).zero(); }
 
         let mut pager = Pager::new(PhysAddr(root_frame));
@@ -254,7 +254,7 @@ impl VirtMemManager {
         let new_committed = replacement.committed_bytes(replaced_size);
         
         let mut tx = VmaTransaction::new();
-        tx.push_pager_unmap(start, end, old.page_size);
+        tx.push_pager_unmap(start, end, old.page_size, old.accounting.charge);
         tx.remove(old_start, old_end);
         
         if old_start < start {
@@ -286,7 +286,7 @@ impl VirtMemManager {
             let cut_end = segment.end.min(end);
             let cut_size = cut_end - cut_start;
 
-            tx.push_pager_unmap(cut_start, cut_end, segment.vma.page_size);
+            tx.push_pager_unmap(cut_start, cut_end, segment.vma.page_size, segment.vma.accounting.charge);
 
             tx.remove(segment.start, segment.end);
 
@@ -476,6 +476,8 @@ impl VirtMemManager {
         pager.map_page(VirtAddr(page_aligned_addr), PhysAddr(phys_addr), hw_flags, PageSize::Size4K, &mut alloc_wrapper)
             .map_err(|_| FaultError::OutOfMemory)?;
 
+        self.accounting.add_resident(4096, vma.accounting.charge);
+
         Ok(())
     }
 
@@ -495,11 +497,13 @@ impl VirtMemManager {
         for tx in txs {
             for op in &tx.pager_ops {
                 match op {
-                    PagerOp::Unmap { start, end, page_size } => {
+                    PagerOp::Unmap { start, end, page_size, charge } => {
                         let mut current = *start;
                         while current < *end {
-                            if let Err(e) = pager.unmap_page_no_flush(VirtAddr(current), *page_size, &mut alloc_wrapper) {
-                                if e != hal::mmu::pager::PagerError::NotMapped { return Err(VmError::MappingFailed); }
+                            match pager.unmap_page_no_flush(VirtAddr(current), *page_size, &mut alloc_wrapper) {
+                                Ok(_) => self.accounting.sub_resident(page_size.bytes(), *charge),
+                                Err(e) if e != hal::mmu::pager::PagerError::NotMapped => return Err(VmError::MappingFailed),
+                                _ => {},
                             }
                             current += page_size.bytes();
                         }
