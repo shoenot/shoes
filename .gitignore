@@ -13,3 +13,4 @@ target
 /ports/mlibc/
 
 assets/**/*.app/bin/
+assets/disk/System/Core/
