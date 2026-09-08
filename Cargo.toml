@@ -1,18 +1,36 @@
 [workspace]
 members = [
     "kernel",
+
+	"lib/vk-hal",
+
     "lib/vespertine-abi",
     "lib/vespertine-common",
     "lib/vespertine-rt", 
     "lib/vespertine-std", 
+
+	"lib/vespertine-app",
     "lib/vespertine-cli",
+	"lib/vespertine-config",
+
+	"userland/auth",
+    "userland/hesper", 
+    "userland/vlog",
+	"userland/vreg",
+
+	"userland/details",
     "userland/dt", 
     "userland/dusk", 
-    "userland/hesper", 
     "userland/ns", 
-    "userland/terminal", "userland/stream", "userland/table", "userland/sys", "userland/nyx", "userland/vreg", "lib/vk-hal", "lib/vespertine-config", "userland/details", "userland/select", "userland/auth",
-    "userland/vlog", "lib/vespertine-app",
+	"userland/nyx",
+	"userland/select",
+	"userland/stream",
+	"userland/sys",
+    "userland/terminal",
+	"userland/table",
 ]
+
+exclude = ["xtask"]
 
 resolver = "2"
 
